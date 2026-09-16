@@ -1,0 +1,13 @@
+[project]
+name = "njupt-badminton"
+version = "0.2.0"
+description = "Local NJUPT booking assistant with bounded requests and private credentials"
+requires-python = ">=3.13,<3.14"
+dependencies = ["requests==2.34.2", "PyYAML==6.0.3", "mitmproxy==12.2.3"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", ".."]
+testpaths = ["tests"]

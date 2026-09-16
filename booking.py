@@ -1,0 +1,193 @@
+"""Deterministic maximum matching and fail-closed, bounded sequential booking."""
+import json
+import os
+import time
+import uuid
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from api import ROOT, SafeError, now_cn
+
+
+def slot_key(s):
+    return '|'.join((s['date'], str(s['id']), s['start'], s['end']))
+
+
+def validate(plan):
+    if not isinstance(plan, dict) or plan.get('version') != 2:
+        raise SafeError('配置必须为 version: 2；旧 example.yaml 不可直接提交。')
+    groups = plan.get('targets', [])
+    if not 1 <= len(groups) <= 6:
+        raise SafeError('目标组数量须为 1..6。')
+    seen = set()
+    for g in groups:
+        if not isinstance(g.get('id'), str) or g['id'] in seen:
+            raise SafeError('目标 id 必须为唯一字符串。')
+        seen.add(g['id'])
+        d = datetime.strptime(g['date'], '%Y-%m-%d').date()
+        start = datetime.strptime(g['start'], '%H:%M').time()
+        end = datetime.strptime(g['end'], '%H:%M').time()
+        if d < now_cn().date() or start >= end or (d == now_cn().date() and start <= now_cn().time().replace(tzinfo=None)):
+            raise SafeError('日期/时间已过期或开始时间不早于结束时间。')
+        courts = g.get('courts')
+        if not isinstance(courts, list) or not courts or len(courts)>30 or any(not isinstance(n,str) or not n.strip() for n in courts) or len(set(courts))!=len(courts):
+            raise SafeError('courts 必须是唯一完整场地名列表，禁止空名称。')
+        if type(g.get('quantity')) is not int or not 1<=g['quantity']<=len(courts):
+            raise SafeError('数量必须为正整数且不大于候选场地数。')
+    total = sum(g['quantity'] for g in groups)
+    if type(plan.get('max_orders')) is not int or not 1<=plan['max_orders']<=6 or total>plan['max_orders']:
+        raise SafeError('订单上限 1..6，且须覆盖所有目标数量。')
+    return plan
+
+
+def choose(groups, found, completed, attempted, exhausted, return_only=None):
+    """Maximum bipartite matching of outstanding units to currently available slots.
+    Preserves feasible choices for constrained groups; not a prediction of competitors.
+    """
+    slots = {slot_key(s):s for s in found if s['available'] and slot_key(s) not in attempted}
+    units, candidates = [], {}
+    for i,g in enumerate(groups):
+        if g['id'] in exhausted:
+            continue
+        cs = [k for k,s in slots.items() if s['date']==g['date'] and s['start']==g['start'] and s['end']==g['end'] and s['name'] in g['courts']]
+        cs.sort(key=lambda k:g['courts'].index(slots[k]['name']))
+        for j in range(max(0,g['quantity']-completed.get(g['id'],0))):
+            unit=(i,j); units.append(unit); candidates[unit]=cs
+    owner = {}
+    def assign(u, visited):
+        for k in candidates[u]:
+            if k in visited:
+                continue
+            visited.add(k)
+            if k not in owner or assign(owner[k],visited):
+                owner[k]=u
+                return True
+        return False
+    for u in units:
+        assign(u,set())
+    if return_only is not None:
+        owner = {k:u for k,u in owner.items() if k in return_only}
+    if not owner:
+        return None
+    # Submit the most constrained assigned unit first; configured priority breaks ties.
+    k,u = min(owner.items(),key=lambda pair:(len(candidates[pair[1]]),pair[1][0],candidates[pair[1]].index(pair[0]),pair[1][1]))
+    return groups[u[0]], slots[k]
+
+
+def atomic(path, obj):
+    tmp=path.with_suffix('.tmp')
+    with tmp.open('w',encoding='utf-8') as f:
+        json.dump(obj,f,ensure_ascii=False,indent=2)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,path)
+
+
+@contextmanager
+def exclusive(private):
+    import msvcrt
+    with (private/'booking.lock').open('a+b') as f:
+        f.seek(0); f.write(b'0'); f.flush(); f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)
+        except OSError:
+            raise SafeError('另一个预约进程正在运行。') from None
+        try:
+            yield
+        finally:
+            f.seek(0); msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1)
+
+
+def existing_keys(private):
+    keys=set()
+    for path in private.glob('run-*.json'):
+        run=json.loads(path.read_text(encoding='utf-8'))
+        for a in run.get('attempts',[]):
+            if a['state'] in ('unknown','submitting'):
+                raise SafeError('历史预约结果未知，须先人工核对订单；禁止重新提交。')
+            if a['state']=='success':
+                keys.add(slot_key(a['slot']))
+    # One-shot development test from the initial integration. Never echo its raw response.
+    legacy=private/'single-test.json'
+    if legacy.exists():
+        obj=json.loads(legacy.read_text(encoding='utf-8'))
+        if obj.get('state')=='unknown':
+            raise SafeError('早期单笔测试结果未知，请先人工核对。')
+        if obj.get('state')=='server_reported_success':
+            s=obj['target'].copy(); s['start']=s['start'][:5]; s['end']=s['end'][:5]
+            keys.add(slot_key(s))
+    return keys
+
+
+def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
+    validate(plan)
+    private=Path(private or ROOT/'private')
+    private.mkdir(exist_ok=True)
+    with exclusive(private):
+        prior=existing_keys(private)
+        plan_id=str(uuid.uuid4())
+        record={'run_id':plan_id,'created_at':now_cn().isoformat(),'plan':plan,'attempts':[], 'state':'running'}
+        path=private/('run-'+plan_id+'.json')
+        atomic(path,record)
+        completed={}; attempted=set(prior); counts={}; exhausted=set()
+        deadline=time.monotonic()+max_seconds
+        try:
+            for _ in range(max_reads):
+                if time.monotonic()>=deadline:
+                    break
+                found=[]
+                for date in dict.fromkeys(g['date'] for g in plan['targets']):
+                    if time.monotonic()>=deadline:
+                        break
+                    found.extend(client.slots(date))
+                # Restore credit for previously successful matching slots, without rebooking.
+                historical = [dict(s, available=s['available'] or slot_key(s) in prior) for s in found]
+                credited = set()
+                while True:
+                    credit = choose(plan['targets'], historical, completed, (attempted-prior)|credited, set(), return_only=prior)
+                    if credit is None:
+                        break
+                    g, s = credit
+                    k = slot_key(s)
+                    completed[g['id']] = completed.get(g['id'], 0) + 1
+                    credited.add(k)
+                    prior.discard(k)
+                if all(completed.get(g['id'],0)>=g['quantity'] for g in plan['targets']):
+                    record['state']='complete'; break
+                next_item=choose(plan['targets'],found,completed,attempted,exhausted)
+                if next_item is None:
+                    time.sleep(min(1,max(0,deadline-time.monotonic())))
+                    continue
+                group,slot=next_item
+                if time.monotonic()>=deadline:
+                    break
+                if len([x for x in record['attempts'] if x['state']=='success'])>=plan['max_orders']:
+                    break
+                a={'target':group['id'],'slot':slot,'state':'submitting','submitted_at':time.time()}
+                record['attempts'].append(a); atomic(path,record)  # durable intent before POST
+                counts[group['id']]=counts.get(group['id'],0)+1
+                attempted.add(slot_key(slot))
+                try:
+                    result=client.submit(slot)
+                except Exception:
+                    result={'state':'unknown','reason':'unhandled_submission_error'}
+                a.update(result)
+                a['estimated_payment_deadline']=a['submitted_at']+300
+                atomic(path,record)
+                if a['state']=='success':
+                    completed[group['id']]=completed.get(group['id'],0)+1
+                    notify('\a预约接口返回成功：'+slot['name']+' '+slot['date']+' '+slot['start']+'–'+slot['end']+'；请立即到小程序核对并付款（五分钟为估计，以页面为准）。')
+                elif a['state'] in ('unknown','blocked'):
+                    record['state']=a['state']; notify('停止：'+a['reason']+'。已有订单保留，不自动取消或重试。'); break
+                elif a['state']!='sold_out':
+                    record['state']='unknown'; break
+                if counts[group['id']]>=max(3,group['quantity']):
+                    exhausted.add(group['id'])
+                if all(completed.get(g['id'],0)>=g['quantity'] for g in plan['targets']):
+                    record['state']='complete'; break
+        finally:
+            if record['state']=='running':
+                record['state']='partial_or_exhausted'
+            record['completed']=completed
+            record['timings']=list(getattr(client,'timings',[]))
+            atomic(path,record)
+        return record

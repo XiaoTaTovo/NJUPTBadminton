@@ -15,7 +15,9 @@ DATA = ROOT / 'private'
 BACKUP = DATA / 'proxy-backup.json'
 TOKEN = DATA / 'session.json'
 REPO = Path(r'D:\01_Workspace\12_Dev_Projects\GitHub_project\NJUPT_badminton_booking')
-MITM = REPO / '.venv/Scripts/mitmdump.exe'
+MITM = ROOT / '.venv/Scripts/mitmdump.exe'
+if not MITM.exists():
+    MITM = REPO / '.venv/Scripts/mitmdump.exe'
 KEY = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 NAMES = ('ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL')
 
