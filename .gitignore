@@ -1,0 +1,14 @@
+private/
+data/
+.history/
+.env
+.env.*
+*.log
+*session_cache*
+*.pem
+*.key
+*.p12
+*.pfx
+__pycache__/
+.pytest_cache/
+.venv/

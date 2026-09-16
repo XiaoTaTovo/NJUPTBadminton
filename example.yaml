@@ -1,0 +1,29 @@
+version: 1
+timezone: Asia/Shanghai
+release:
+  expected: "12:00:00"
+  probe_before_seconds: 30
+  fast_probe_interval_ms: 500
+  normal_probe_interval_ms: 3000
+  max_runtime_seconds: 90
+limits:
+  max_orders: 3
+  max_attempts_per_target: 3
+  min_submit_interval_ms: 1000
+targets:
+  - id: evening-18
+    date: "2026-09-20"
+    start: "18:00"
+    end: "19:00"
+    quantity: 1
+    venues:
+      - name: "三牌楼羽毛球馆"
+        courts: ["一号场地", "四号场地"]
+  - id: evening-19
+    date: "2026-09-20"
+    start: "19:00"
+    end: "20:00"
+    quantity: 1
+    venues:
+      - name: "三牌楼羽毛球馆"
+        courts: ["二号场地", "五号场地"]
