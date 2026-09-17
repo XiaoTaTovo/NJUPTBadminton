@@ -11,36 +11,64 @@ from booking import validate, run, atomic
 PRIVATE=ROOT/'private'
 PLAN=PRIVATE/'plan.json'
 
+def number(prompt, low, high, default=None):
+    while True:
+        raw=input(prompt).strip()
+        if not raw and default is not None:
+            return default
+        if raw.isdigit() and low <= int(raw) <= high:
+            return int(raw)
+        print(f'请输入 {low}–{high} 范围内的数字。')
+
+
+def choose_date():
+    today=now_cn().date().isoformat()
+    choice=number(f'预约日期：1（今天 {today}，默认） 2（指定其他日期）：',1,2,1)
+    if choice==1:
+        return today
+    while True:
+        raw=input('其他日期（YYYY-MM-DD）：').strip()
+        try:
+            datetime.strptime(raw,'%Y-%m-%d')
+            return raw
+        except ValueError:
+            print('日期格式错误，例如 2026-09-18。')
+
+
 def wizard():
     c=Client()
     try:
-        date=input('预约日期 YYYY-MM-DD（回车=今天）：').strip() or now_cn().date().isoformat()
+        date=choose_date()
         datetime.strptime(date,'%Y-%m-%d')
         all_slots=c.slots(date)
-        area=input('场馆筛选（三牌楼/仙林；回车=三牌楼）：').strip() or '三牌楼'
-        if area not in ('三牌楼','仙林'):
-            raise SafeError('请填写 三牌楼 或 仙林。')
+        area={1:'仙林',2:'三牌楼'}[number('场馆：1（仙林，默认） 2（三牌楼）：',1,2,1)]
         filtered=[s for s in all_slots if area in s['name'] and s['date']==date]
         if not filtered:
             raise SafeError('所选日期未返回该场馆场次，不能凭空创建场次。')
         times=sorted({(s['start'],s['end']) for s in filtered})
-        print('接口已返回的时段：', '、'.join(a+'–'+b for a,b in times))
-        count=int(input('配置几个目标组（1..6；同一时段多场用一个组）：'))
-        if not 1<=count<=6:
-            raise SafeError('目标组数量超出范围。')
+        count=number('目标组数量（1–6；每个时段一组，回车默认1组）：',1,6,1)
         groups=[]
         for i in range(count):
-            start=input(f'目标{i+1} 开始 HH:MM：').strip()
-            end=input('结束 HH:MM：').strip()
+            print(f'目标{i+1}：请选择时间段')
+            for j,(start,end) in enumerate(times,1):
+                print(f'{j}（{start}–{end}）')
+            selected=number('时段序号（输入上面的数字）：',1,len(times))
+            start,end=times[selected-1]
             candidates=sorted([s for s in filtered if s['start']==start and s['end']==end],key=lambda s:s['name'])
             if not candidates:
                 raise SafeError('该时段未返回场次。')
             for j,s in enumerate(candidates,1):
-                print(j,s['name'],'可用' if s['available'] else '当前不可用')
-            indices=[int(x.strip())-1 for x in input('按优先顺序输入候选序号，逗号分隔（例如 1,3,2）：').replace('，',',').split(',')]
-            if any(j<0 or j>=len(candidates) for j in indices):
-                raise SafeError('候选序号越界。')
-            quantity=int(input('这个时段需要几场（默认1）：').strip() or '1')
+                print(f"{j}（{s['name']}；{'当前可用' if s['available'] else '当前不可用'}）")
+            while True:
+                raw=input('候选序号（逗号分隔；例如1,3,2表示先选1，再选3，再选2）：').replace('，',',')
+                try:
+                    indices=[int(x.strip())-1 for x in raw.split(',')]
+                    if len(set(indices))!=len(indices) or any(j<0 or j>=len(candidates) for j in indices):
+                        raise ValueError()
+                    break
+                except ValueError:
+                    print('请输入不重复且有效的场地序号。')
+            quantity=number('这个时段要几场（1=任一候选成功即可；2=需要两场；回车默认1）：',1,min(6,len(indices)),1)
             groups.append({'id':f'target-{i+1}','date':date,'start':start,'end':end,'quantity':quantity,
                            'courts':[candidates[j]['name'] for j in indices]})
         plan={'version':2,'targets':groups,'max_orders':sum(g['quantity'] for g in groups)}
@@ -67,7 +95,7 @@ def execute(scheduled=False):
         remaining=(fire-now_cn()).total_seconds()
         if not 0<remaining<=3600:
             raise SafeError('仅支持未来一小时内启动。临近放场先刷新凭据。')
-    if input('会真实占场但不支付。输入 BOOK 确认（其他输入退出）：').strip()!='BOOK':
+    if number('确认：1（真实预约，不付款） 0（返回，默认）：',0,1,0)!=1:
         return
     c=Client()
     try:

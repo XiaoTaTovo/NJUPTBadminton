@@ -101,7 +101,7 @@ def capture(seconds):
         raise RuntimeError('项目 mitmdump 或 Clash 7897 不可用。')
     if connection(8080):
         raise RuntimeError('8080 已占用。请在之前手动启动代理的窗口按 Ctrl+C，再试。')
-    if input('将临时修改系统代理并仅捕获本人南邮会话，结束后恢复。输入 CAPTURE 继续：') != 'CAPTURE':
+    if input('1（临时切换代理，捕获本人凭据后恢复） 0（返回，默认）：').strip() != '1':
         return
     protect_dir()
     before = snapshot()
