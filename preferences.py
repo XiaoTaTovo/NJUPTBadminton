@@ -57,6 +57,18 @@ def label(name):
     return LABELS[tier(name)]
 
 
-def ordered(names):
+DEFAULT_PRIORITY = {'tier_order':[0,1,2,3], 'preferred_3f_court':6}
+
+
+def rank(name, policy=None):
+    policy = policy or DEFAULT_PRIORITY
+    t = tier(name)
+    order = policy.get('tier_order',[0,1,2,3])
+    level = order.index(t) if t in order else 4
+    preferred = 0 if t==0 and court_number(name)==policy.get('preferred_3f_court',6) else 1
+    return level, preferred
+
+
+def ordered(names, policy=None):
     """Stable sort: do not impose doubles priority on the 1F/2F groups."""
-    return sorted(names,key=tier)
+    return sorted(names,key=lambda n:rank(n,policy))

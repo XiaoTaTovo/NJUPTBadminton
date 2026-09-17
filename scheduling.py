@@ -22,7 +22,7 @@ def wait_for_start(fire, warmup, now=now_cn, monotonic=time.monotonic, sleep=tim
         sleep(min(.2,deadline-monotonic()))
     fired=now()
     drift=(fired-fire).total_seconds()
-    if drift<-.2 or drift>3:
+    if drift<0 or drift>3:
         raise SafeError('时钟变化或休眠导致错过窗口，拒绝提前提交或补跑。')
     info.update(fired_at=fired.isoformat(),trigger_lateness_ms=round(drift*1000,3))
     return info

@@ -60,7 +60,7 @@ def restore():
 
 def connection(port):
     try:
-        with socket.create_connection(('127.0.0.1', port), timeout=1):
+        with socket.create_connection(('127.0.0.1', port), timeout=.25):
             return True
     except OSError:
         return False

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from api import ROOT, SafeError, now_cn
-from preferences import tier
+from preferences import tier, rank
 
 
 def slot_key(s):
@@ -31,7 +31,7 @@ def validate(plan):
         if d < now_cn().date() or start >= end or (d == now_cn().date() and start <= now_cn().time().replace(tzinfo=None)):
             raise SafeError('日期/时间已过期或开始时间不早于结束时间。')
         courts = g.get('courts')
-        if not isinstance(courts, list) or not courts or len(courts)>30 or any(not isinstance(n,str) or not n.strip() for n in courts) or len(set(courts))!=len(courts):
+        if not isinstance(courts, list) or not courts or len(courts)>100 or any(not isinstance(n,str) or not n.strip() for n in courts) or len(set(courts))!=len(courts):
             raise SafeError('courts 必须是唯一完整场地名列表，禁止空名称。')
         if type(g.get('quantity')) is not int or not 1<=g['quantity']<=len(courts):
             raise SafeError('数量必须为正整数且不大于候选场地数。')
@@ -43,6 +43,9 @@ def validate(plan):
             same_candidates = set(left['courts']) == set(right['courts'])
             if same_window and same_candidates:
                 raise SafeError('同一日期和时段的目标组候选有重叠；如果要两场，请合并成一个目标组并把数量填2，这是输入防误操作检查，不表示已经证实服务端会因两组配置拒绝。')
+    attempts=plan.get('max_attempts_per_target',3)
+    if type(attempts) is not int or not 1<=attempts<=20:
+        raise SafeError('每组尝试上限必须为1–20。')
     total = sum(g['quantity'] for g in groups)
     if type(plan.get('max_orders')) is not int or not 1<=plan['max_orders']<=6 or total>plan['max_orders']:
         raise SafeError('订单上限 1..6，且须覆盖所有目标数量。')
@@ -59,7 +62,7 @@ def choose(groups, found, completed, attempted, exhausted, return_only=None):
         if g['id'] in exhausted:
             continue
         cs = [k for k,s in slots.items() if s['date']==g['date'] and s['start']==g['start'] and s['end']==g['end'] and s['name'] in g['courts']]
-        cs.sort(key=lambda k:(tier(slots[k]['name']),g['courts'].index(slots[k]['name'])))
+        cs.sort(key=lambda k:(*rank(slots[k]['name'],g.get('priority')),g['courts'].index(slots[k]['name'])))
         for j in range(max(0,g['quantity']-completed.get(g['id'],0))):
             unit=(i,j); units.append(unit); candidates[unit]=cs
     owner = {}
@@ -132,7 +135,7 @@ def existing_keys(private):
     return keys
 
 
-def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
+def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, prepared=None, before_first_submit=None):
     validate(plan)
     private=Path(private or ROOT/'private')
     private.mkdir(exist_ok=True)
@@ -144,15 +147,21 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
         atomic(path,record)
         completed={}; attempted=set(prior); counts={}; exhausted=set()
         deadline=time.monotonic()+max_seconds
+        pending_gate=before_first_submit
         try:
             for _ in range(max_reads):
                 if time.monotonic()>=deadline:
                     break
                 found=[]
-                for date in dict.fromkeys(g['date'] for g in plan['targets']):
-                    if time.monotonic()>=deadline:
-                        break
-                    found.extend(client.slots(date))
+                if prepared is not None:
+                    found=[dict(s) for s in prepared]
+                    prepared=None
+                    record['first_selection_source']='prefetched_today'
+                else:
+                    for date in dict.fromkeys(g['date'] for g in plan['targets']):
+                        if time.monotonic()>=deadline:
+                            break
+                        found.extend(client.slots(date))
                 observation={'observed_at':now_cn().isoformat(),'targets':[]}
                 for g in plan['targets']:
                     matching=[s for s in found if s['date']==g['date'] and s['start']==g['start'] and s['end']==g['end'] and s['name'] in g['courts']]
@@ -176,6 +185,8 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
                 if all(completed.get(g['id'],0)>=g['quantity'] for g in plan['targets']):
                     record['state']='complete'; break
                 next_item=choose(plan['targets'],found,completed,attempted,exhausted)
+                if next_item is None and pending_gate is not None:
+                    raise SafeError('提前准备未找到可提交目标；已取消定时，不在12点改为盲查。')
                 if next_item is None:
                     time.sleep(min(1,max(0,deadline-time.monotonic())))
                     continue
@@ -188,6 +199,18 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
                 record['attempts'].append(a); atomic(path,record)  # durable intent before POST
                 counts[group['id']]=counts.get(group['id'],0)+1
                 attempted.add(slot_key(slot))
+                if pending_gate is not None:
+                    a['prepared_at']=a['submitted_at']
+                    try:
+                        # The intent is already durable. No GET or fsync between this gate and POST.
+                        record['schedule']=pending_gate()
+                    except BaseException:
+                        a.update(state='not_submitted',reason='interrupted_before_send')
+                        atomic(path,record)
+                        raise
+                    pending_gate=None
+                    deadline=time.monotonic()+max_seconds
+                    a['submitted_at']=time.time()
                 try:
                     result=client.submit(slot)
                 except Exception:
@@ -202,7 +225,7 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
                     record['state']=a['state']; notify('停止：'+a['reason']+'。已有订单保留，不自动取消或重试。'); break
                 elif a['state']!='sold_out':
                     record['state']='unknown'; break
-                if counts[group['id']]>=max(3,group['quantity']):
+                if counts[group['id']]>=plan.get('max_attempts_per_target',max(3,group['quantity'])):
                     exhausted.add(group['id'])
                 if all(completed.get(g['id'],0)>=g['quantity'] for g in plan['targets']):
                     record['state']='complete'; break

@@ -101,35 +101,15 @@ def load_plan():
     return validate(json.loads(PLAN.read_text(encoding='utf-8')))
 
 def execute(scheduled=False):
-    plan=load_plan(); summary(plan)
-    fire=None
     if scheduled:
-        print('这里填脚本何时开始，不是打球时段。最多提前1小时；格式例如2026-09-17 12:00:00。')
-        text=input('启动北京时间 YYYY-MM-DD HH:MM:SS（例如当天12:00:00）：').strip()
-        fire=datetime.strptime(text,'%Y-%m-%d %H:%M:%S').replace(tzinfo=CN)
-        remaining=(fire-now_cn()).total_seconds()
-        if not 0<remaining<=3600:
-            raise SafeError('仅支持未来一小时内启动。临近放场先刷新凭据。')
+        from daily import execute as daily_execute
+        return daily_execute()
+    plan=load_plan(); summary(plan)
     if number('确认：1（真实预约，不付款） 0（返回，默认）：',0,1,0)!=1:
         return
     c=Client()
     try:
         c.types()
-        if fire:
-            remaining=(fire-now_cn()).total_seconds()
-            if c.claims['exp']<=time.time()+remaining+300:
-                raise SafeError('凭据无法覆盖启动时间，请先刷新。')
-            print('等待北京时间启动；距启动约20秒做一次只读预热，不提前提交预约。')
-            schedule={'scheduled_at':fire.isoformat(),'state':'waiting'}
-            atomic(PRIVATE/'latest-schedule.json',schedule)
-            try:
-                schedule.update(wait_for_start(fire,c.types))
-                schedule['state']='triggered'
-            except Exception as exc:
-                schedule.update(state='failed',error_type=type(exc).__name__)
-                raise
-            finally:
-                atomic(PRIVATE/'latest-schedule.json',schedule)
         result=run(plan,c)
         print('本轮状态：',result['state'],'；成功数量：',sum(result['completed'].values()))
         print('未自动支付、取消或查询订单。请在小程序核对；结果未知必须人工处理。')
@@ -197,7 +177,7 @@ def results():
                 left=max(0,int(a['estimated_payment_deadline']-time.time()))
                 print('  估算支付剩余秒数：',left,'；以小程序实际状态为准。')
 
-def main():
+def advanced_main():
     import local_session
     local_session.protect_dir()
     menu={'1':lambda:local_session.capture(300),'2':local_session.verify,'3':wizard,
@@ -218,6 +198,29 @@ def main():
             print(str(e))
         except Exception as e:
             print('操作失败：'+type(e).__name__+'；不输出凭据或原始响应。')
+
+def main():
+    import daily
+    import local_session
+    local_session.protect_dir()
+    menu={'1':daily.execute,'2':lambda:daily.execute(immediate=True),
+          '3':daily.change_windows,'4':daily.change_priority,
+          '5':lambda:local_session.capture(300),'6':local_session.verify,
+          '7':results,'8':advanced_main,'9':show_help}
+    while True:
+        try:
+            print('\n【每日快捷预约】')
+            daily.describe(daily.load_settings())
+            print('1（今天12点预约，默认） 2（今天立即预约）\n3（修改每日时段/场数） 4（可选：修改优先级）\n5（获取/刷新凭据） 6（只读验证登录）\n7（查看结果） 8（高级工具，0返回） 9（字段帮助） 0（退出）')
+            option=input('输入数字（回车选1；提交前仍需确认）：').strip() or '1'
+            if option=='0': return
+            if option in menu: menu[option]()
+            else: print('请输入0–9。')
+        except (KeyboardInterrupt, EOFError):
+            print('已退出等待；若曾提交，请到小程序核对，勿盲目重试。')
+            return
+        except SafeError as e: print(str(e))
+        except Exception as e: print('操作失败：'+type(e).__name__+'；未输出凭据或原始响应。')
 
 if __name__=='__main__':
     main()

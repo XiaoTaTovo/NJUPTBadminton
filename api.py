@@ -69,7 +69,9 @@ class Client:
 
     def request(self, method, path, **kwargs):
         # All calls, including reads, share a conservative 1-second start interval.
-        time.sleep(max(0, 1-(time.monotonic()-self.last_request)))
+        delay = 1-(time.monotonic()-self.last_request)
+        if delay > 0:
+            time.sleep(delay)
         self.last_request = time.monotonic()
         wall = time.time()
         endpoint = 'booking' if '/booking/' in path else 'slots' if '/time/display/' in path else 'types'

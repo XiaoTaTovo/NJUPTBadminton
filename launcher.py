@@ -41,8 +41,10 @@ def owned_kind(command, cwd, root=ROOT):
 
 def owned_processes():
     found=[]
-    for p in psutil.process_iter():
+    for p in psutil.process_iter(['name']):
         if p.pid==os.getpid(): continue
+        if (p.info.get('name') or '').lower() not in ('python.exe','pythonw.exe','python','pythonw','mitmdump.exe','mitmdump'):
+            continue
         try:
             kind=owned_kind(p.cmdline(),p.cwd())
             if kind:
@@ -100,15 +102,13 @@ def main():
     from local_session import protect_dir, BACKUP, restore
     protect_dir()
     with startup_lock():
+        print('正在检查本项目旧进程…',flush=True)
         count=stop_owned()
         if count:
             print(f'已关闭本项目旧进程 {count} 个。若曾提交订单，请先核对；未知状态不会清空。',flush=True)
         if BACKUP.exists():
             restore()
-        # A manually launched untagged proxy is NOT ours to terminate.
-        from local_session import connection
-        if connection(8080):
-            print('提示：8080仍被其他进程占用；不会误杀。捕获前请手动关闭该代理。',flush=True)
+        print('正在打开助手（无需启动时探测8080；抓包时才检查端口）…',flush=True)
         proc=subprocess.Popen([sys.executable,str(ROOT/'app.py')],cwd=ROOT)
     code=proc.wait()
     # Replacement on Windows terminates the app: exit old launcher without leaving a pause prompt.
@@ -118,6 +118,9 @@ def main():
 if __name__=='__main__':
     try:
         sys.exit(main())
+    except KeyboardInterrupt:
+        print('启动已由用户中止；再次双击即可重开。')
+        sys.exit(0)
     except Exception as e:
         print('启动失败：'+(str(e) if isinstance(e,RuntimeError) else type(e).__name__))
         sys.exit(2)
