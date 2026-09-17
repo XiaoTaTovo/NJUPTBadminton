@@ -35,6 +35,14 @@ def validate(plan):
             raise SafeError('courts 必须是唯一完整场地名列表，禁止空名称。')
         if type(g.get('quantity')) is not int or not 1<=g['quantity']<=len(courts):
             raise SafeError('数量必须为正整数且不大于候选场地数。')
+    # One wizard is scoped to one venue. Duplicate overlapping groups at one time
+    # are almost always a mistaken way to request two courts; use quantity=2 instead.
+    for i, left in enumerate(groups):
+        for right in groups[i + 1:]:
+            same_window = (left['date'], left['start'], left['end']) == (right['date'], right['start'], right['end'])
+            same_candidates = set(left['courts']) == set(right['courts'])
+            if same_window and same_candidates:
+                raise SafeError('同一日期和时段的目标组候选有重叠；如果要两场，请合并成一个目标组并把数量填2，避免服务端按重复预约拒绝。')
     total = sum(g['quantity'] for g in groups)
     if type(plan.get('max_orders')) is not int or not 1<=plan['max_orders']<=6 or total>plan['max_orders']:
         raise SafeError('订单上限 1..6，且须覆盖所有目标数量。')

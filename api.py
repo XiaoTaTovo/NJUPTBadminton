@@ -18,6 +18,30 @@ class SafeError(RuntimeError):
 def now_cn():
     return datetime.now(CN)
 
+def classify_rejection(err_code, message):
+    """Map server text to a safe operational category; never persist the raw text."""
+    msg = str(message or '').strip()
+    if err_code == 5004 or any(x in msg for x in ('登录', 'token', 'TOKEN', '认证')):
+        category = 'login_expired'
+    elif any(x in msg for x in ('未支付', '待支付', '订单上限', '预约上限', '超限')):
+        category = 'unpaid_order_limit'
+    elif any(x in msg for x in ('频繁', '限流', '稍后', '过快', '请求过多')):
+        category = 'rate_limit'
+    elif any(x in msg for x in ('验证码', '风控', '安全验证')):
+        category = 'verification_required'
+    elif any(x in msg for x in ('已被预约', '已被预订', '已被他人', '已约满', '已满', '已被占用', '无余量', '不可用', '售罄')):
+        category = 'sold_out'
+    elif any(x in msg for x in ('重复', '同一时段', '时间段', '每人', '不能同时', '不允许', '预约失败')):
+        category = 'booking_rule_rejected'
+    else:
+        category = 'server_rejected_unknown'
+    return {
+        'category': category,
+        'err_code': err_code,
+        'message_length': len(msg),
+        'message_digest': hashlib.sha256(msg.encode('utf-8')).hexdigest()[:12] if msg else None,
+    }
+
 class Client:
     def __init__(self, credential=None):
         raw = credential or json.loads((ROOT/'private/session.json').read_text(encoding='utf-8'))
@@ -135,18 +159,12 @@ class Client:
                         'price':d.get('price'), 'raw_status':d.get('status')}
             if b.get('success') is not False:
                 return {'state':'unknown','reason':'unrecognized_response'}
-            msg = str(b.get('errMsg') or '')
-            # Business limit/auth/captcha errors always stop, never change account or loop.
-            if b.get('errCode') == 5004 or any(x in msg for x in ('超限','上限','未支付','频繁','验证码','登录','权限')):
-                reason = ('login_expired' if b.get('errCode') == 5004 or '登录' in msg else
-                          'unpaid_order_limit' if '未支付' in msg else
-                          'rate_limit' if '频繁' in msg else
-                          'verification_required' if '验证码' in msg else
-                          'account_or_rate_limit')
-                return {'state':'blocked','reason':reason}
-            if any(x in msg for x in ('已被预约','已被预订','已被他人','已约满','已满','已被占用')):
-                return {'state':'sold_out','reason':'explicit_unavailable'}
-            # Unknown explicit failures still stop: don't assume a retry is safe.
-            return {'state':'blocked','reason':'unrecognized_business_failure'}
+            rejection = classify_rejection(b.get('errCode'), b.get('errMsg'))
+            category = rejection['category']
+            if category == 'sold_out':
+                return {'state':'sold_out', 'reason':'explicit_unavailable', **rejection}
+            # Every other business rejection stops. We retain only a safe category/code/digest,
+            # so the next diagnosis can distinguish a rule rejection from a rate limit without logging credentials or raw text.
+            return {'state':'blocked', 'reason':category, **rejection}
         except Exception:
             return {'state':'unknown','reason':'transport_or_schema_error'}

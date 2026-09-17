@@ -37,6 +37,10 @@ class EngineTests(unittest.TestCase):
     def test_only_exact_time_date_names(self):
         self.assertIsNone(choose([group()], [slot('wrong')],{},set(),set()))
         self.assertIsNone(choose([group()], [slot(available=False)],{},set(),set()))
+    def test_duplicate_same_window_same_candidates_rejected(self):
+        p=plan([group('a',['A','B']),group('b',['B','A'])])
+        with self.assertRaises(SafeError): validate(p)
+
     def test_bad_plans(self):
         for change in ({'max_orders':0},{'version':1},{'max_orders':True}):
             p=plan(); p.update(change)

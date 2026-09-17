@@ -60,6 +60,8 @@ def wizard():
                 print(f'{j}（{start}–{end}）')
             selected=number('时段序号（只填1个数字；如1，不填1,2或18:00）：',1,len(times))
             start,end=times[selected-1]
+            if any(g['start']==start and g['end']==end and g['date']==date for g in groups):
+                raise SafeError('这个日期和时段已经配置过；如果需要同一时段多场，请在第一个目标组把数量填2，不要再建重复组。')
             candidates=sorted([s for s in filtered if s['start']==start and s['end']==end],key=lambda s:(tier(s['name']),s['name']))
             if not candidates:
                 raise SafeError('该时段未返回场次。')
