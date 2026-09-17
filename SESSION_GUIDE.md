@@ -2,7 +2,7 @@
 
 ## 状态
 
-这是新实现的捕获启动器，不是完整预约程序。离线测试通过不代表企业微信网络已经接入。
+捕获和真实提交已做过本机验证，但不代表每次登录仍有效。完整字段与操作说明见USAGE.md，或在统一入口输入10。
 统一入口使用本项目 uv 虚拟环境，不修改原仓库、不安装全局模块、不自动安装证书。捕获和验证菜单不创建订单；预约菜单需另行输入 1（确认预约） 确认。
 
 ## 操作
@@ -40,9 +40,9 @@ private/proxy-backup.json 仅在代理尚待恢复时存在。
 ## 接入所需字段
 
 - 本地保留：token（请求头）、expires_at、captured_at。
-- 场次解析：localDate、timeFields、startTime、endTime、stadiumInfos、id、name、status。来自参考仓库，仍需真实只读验证。
+- 场次解析：localDate、timeFields、startTime、endTime、stadiumInfos、id、name、status。已通过本机场次查询验证，未来结构变化仍需重新核验。
 - 后续预约需要确认：订单号、订单状态、支付截止时间、查询订单接口与分页。不能根据旧仓库猜测它们。
-- 参考仓库提交还使用本人学号、timestamp、fingerprint，真实提交适配尚未完成，不需要现在发出这些信息。
+- 参考仓库提交还使用本人学号、timestamp、fingerprint，真实提交适配已实现，这些信息留在本机，不需要发出。
 
 ## 排障
 

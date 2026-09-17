@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from api import ROOT, SafeError, now_cn
+from preferences import tier
 
 
 def slot_key(s):
@@ -50,7 +51,7 @@ def choose(groups, found, completed, attempted, exhausted, return_only=None):
         if g['id'] in exhausted:
             continue
         cs = [k for k,s in slots.items() if s['date']==g['date'] and s['start']==g['start'] and s['end']==g['end'] and s['name'] in g['courts']]
-        cs.sort(key=lambda k:g['courts'].index(slots[k]['name']))
+        cs.sort(key=lambda k:(tier(slots[k]['name']),g['courts'].index(slots[k]['name'])))
         for j in range(max(0,g['quantity']-completed.get(g['id'],0))):
             unit=(i,j); units.append(unit); candidates[unit]=cs
     owner = {}

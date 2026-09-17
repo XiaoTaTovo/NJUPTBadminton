@@ -7,6 +7,8 @@ from statistics import median
 from email.utils import parsedate_to_datetime
 from api import Client, ROOT, SafeError, now_cn, CN
 from booking import validate, run, atomic
+from preferences import tier, label, ordered, RULE
+from user_help import GROUP_HELP, MENU, show_help
 
 PRIVATE=ROOT/'private'
 PLAN=PRIVATE/'plan.json'
@@ -36,31 +38,37 @@ def choose_date():
 
 
 def wizard():
+    print('配置流程：日期 → 场馆 → 组数 → 每组时段/候选/数量 → 保存。全程不会下单。')
     c=Client()
     try:
         date=choose_date()
         datetime.strptime(date,'%Y-%m-%d')
         all_slots=c.slots(date)
         area={1:'仙林',2:'三牌楼'}[number('场馆：1（仙林，默认） 2（三牌楼）：',1,2,1)]
+        if area=='仙林':
+            print('默认优先级：'+RULE+'（只在你选择的候选中生效）')
         filtered=[s for s in all_slots if area in s['name'] and s['date']==date]
         if not filtered:
             raise SafeError('所选日期未返回该场馆场次，不能凭空创建场次。')
         times=sorted({(s['start'],s['end']) for s in filtered})
+        print(GROUP_HELP)
         count=number('目标组数量（1–6；每个时段一组，回车默认1组）：',1,6,1)
         groups=[]
         for i in range(count):
-            print(f'目标{i+1}：请选择时间段')
+            print(f'【第 {i+1}/{count} 组】请选择这一个组的时间段；填完场地和数量才进入下一组。')
             for j,(start,end) in enumerate(times,1):
                 print(f'{j}（{start}–{end}）')
-            selected=number('时段序号（输入上面的数字）：',1,len(times))
+            selected=number('时段序号（只填1个数字；如1，不填1,2或18:00）：',1,len(times))
             start,end=times[selected-1]
-            candidates=sorted([s for s in filtered if s['start']==start and s['end']==end],key=lambda s:s['name'])
+            candidates=sorted([s for s in filtered if s['start']==start and s['end']==end],key=lambda s:(tier(s['name']),s['name']))
             if not candidates:
                 raise SafeError('该时段未返回场次。')
+            print(f'已选：{date} {start}–{end}。下面的数字是列表序号，不一定等于场地号。')
+            print('当前可用只是查询快照；不可用场地也可作备选，正式运行会重新查询。')
             for j,s in enumerate(candidates,1):
-                print(f"{j}（{s['name']}；{'当前可用' if s['available'] else '当前不可用'}）")
+                print(f"{j}（{s['name']}；{'当前可用' if s['available'] else '当前不可用'}；{label(s['name'])}）")
             while True:
-                raw=input('候选序号（逗号分隔；例如1,3,2表示先选1，再选3，再选2）：').replace('，',',')
+                raw=input('候选序号（逗号分隔；例如1,3,2；优先级规则优先，同一档按输入顺序）：').replace('，',',')
                 try:
                     indices=[int(x.strip())-1 for x in raw.split(',')]
                     if len(set(indices))!=len(indices) or any(j<0 or j>=len(candidates) for j in indices):
@@ -68,19 +76,22 @@ def wizard():
                     break
                 except ValueError:
                     print('请输入不重复且有效的场地序号。')
-            quantity=number('这个时段要几场（1=任一候选成功即可；2=需要两场；回车默认1）：',1,min(6,len(indices)),1)
+            remaining=6-sum(g['quantity'] for g in groups)-(count-i-1)
+            upper=min(remaining,len(indices))
+            quantity=number(f'第{i+1}组需要几场（1=任一候选成功；2=需要两场；本组可填1–{upper}，回车默认1）：',1,upper,1)
             groups.append({'id':f'target-{i+1}','date':date,'start':start,'end':end,'quantity':quantity,
-                           'courts':[candidates[j]['name'] for j in indices]})
+                           'courts':ordered([candidates[j]['name'] for j in indices])})
         plan={'version':2,'targets':groups,'max_orders':sum(g['quantity'] for g in groups)}
         validate(plan); atomic(PLAN,plan)
-        print('配置已保存，仅保存配置，不预约。')
+        print('配置已保存（替换上次配置），没有预约。请核对下方清单，再选菜单4或5执行。')
         summary(plan)
     finally:
         c.close()
 
 def summary(plan):
+    print('场地优先级：'+RULE+'；同一档按你的候选顺序，未知名称排最后。')
     for g in plan['targets']:
-        print(f"{g['date']} {g['start']}–{g['end']}，需要 {g['quantity']} 场；候选："+' → '.join(g['courts']))
+        print(f"{g['date']} {g['start']}–{g['end']}，需要 {g['quantity']} 场；候选："+' → '.join(ordered(g['courts'])))
     print('总订单上限：',plan['max_orders'])
 
 def load_plan():
@@ -90,6 +101,7 @@ def execute(scheduled=False):
     plan=load_plan(); summary(plan)
     fire=None
     if scheduled:
+        print('这里填脚本何时开始，不是打球时段。最多提前1小时；格式例如2026-09-17 12:00:00。')
         text=input('启动北京时间 YYYY-MM-DD HH:MM:SS（例如当天12:00:00）：').strip()
         fire=datetime.strptime(text,'%Y-%m-%d %H:%M:%S').replace(tzinfo=CN)
         remaining=(fire-now_cn()).total_seconds()
@@ -182,15 +194,17 @@ def main():
     import local_session
     local_session.protect_dir()
     menu={'1':lambda:local_session.capture(300),'2':local_session.verify,'3':wizard,
-          '4':lambda:execute(False),'5':lambda:execute(True),'6':benchmark,'7':results,'8':local_session.restore,'9':observe}
+          '4':lambda:execute(False),'5':lambda:execute(True),'6':benchmark,'7':results,'8':local_session.restore,'9':observe,'10':show_help}
     while True:
-        print('\n南邮预约助手\n1 刷新本人的凭据\n2 只读验证凭据\n3 查询并配置目标\n4 立即预约（需确认）\n5 定时预约（需确认）\n6 三次只读延迟测量\n7 查看本地执行结果\n8 恢复异常退出的系统代理\n9 根据配置只读观测放场\n0 退出')
+        print(MENU)
         option=input('请选择：').strip()
         if option=='0':
             return
         try:
             if option in menu:
                 menu[option]()
+            else:
+                print('请输入菜单数字0–10；输入10可查看完整帮助。')
         except KeyboardInterrupt:
             print('已中止；若有请求在途，请先到小程序核对订单，不要重复提交。')
         except SafeError as e:
