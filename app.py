@@ -223,4 +223,11 @@ def main():
         except Exception as e: print('操作失败：'+type(e).__name__+'；未输出凭据或原始响应。')
 
 if __name__=='__main__':
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        print('已退出，未继续执行。')
+    except Exception as exc:
+        print(str(exc) if isinstance(exc, (SafeError, RuntimeError)) else '启动失败：'+type(exc).__name__+'；请使用 setup_environment.bat 检查环境。')
+        raise SystemExit(2)
+

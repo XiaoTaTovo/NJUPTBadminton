@@ -21,10 +21,34 @@ if not MITM.exists():
 KEY = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 NAMES = ('ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL')
 
+_protected = False
+
 def protect_dir():
+    """Protect once per process; never continue to credentials after a failed ACL check."""
+    global _protected
+    if _protected:
+        return
     DATA.mkdir(exist_ok=True)
-    sid = subprocess.check_output(['whoami', '/user', '/fo', 'csv', '/nh'], text=True).strip().split(',')[-1].strip('"')
-    subprocess.run(['icacls', str(DATA), '/inheritance:r', '/grant:r', f'*{sid}:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'], check=True, stdout=subprocess.DEVNULL)
+    print('检查本地凭据目录权限…', flush=True)
+    try:
+        sid = subprocess.check_output(
+            ['whoami', '/user', '/fo', 'csv', '/nh'], text=True,
+            timeout=5, creationflags=subprocess.CREATE_NO_WINDOW
+        ).strip().split(',')[-1].strip('"')
+        import re
+        if not re.fullmatch(r'S-1-\d+(?:-\d+)+', sid):
+            raise RuntimeError('无法确认当前Windows用户，未读取凭据。')
+        subprocess.run(
+            ['icacls', str(DATA), '/inheritance:r', '/grant:r',
+             f'*{sid}:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('Windows权限检查超时，已停止；没有读取凭据。请稍后重开，不必重装环境。') from None
+    except (OSError, subprocess.CalledProcessError):
+        raise RuntimeError('本地权限检查失败，已停止；没有读取凭据。无需同步Python环境。') from None
+    _protected = True
+
 
 def snapshot():
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, KEY) as k:

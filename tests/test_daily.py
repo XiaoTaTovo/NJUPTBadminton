@@ -82,13 +82,13 @@ def test_prefetch_wait_stops_at_minus_sixty():
     daily.wait_until_prefetch(fire,now=lambda:fire-timedelta(seconds=120-elapsed[0]),monotonic=lambda:elapsed[0],sleep=sleep)
     assert elapsed[0]==60
 
-def test_bootstrap_second_launch_skips_uv(tmp_path):
-    (tmp_path/'pyproject.toml').write_text('project');(tmp_path/'uv.lock').write_text('locked')
-    stamp=tmp_path/'stamp.json'
-    with patch.object(bootstrap,'ROOT',tmp_path),patch.object(bootstrap,'STAMP',stamp),patch('bootstrap.importlib.util.find_spec',return_value=True),patch('bootstrap.subprocess.run') as sync,patch('bootstrap.subprocess.call',return_value=0):
+def test_compatibility_bootstrap_only_delegates():
+    with patch('launcher.main',return_value=0) as launch, patch('subprocess.run') as run:
         assert bootstrap.main()==0
-        assert bootstrap.main()==0
-        assert sync.call_count==1
+        launch.assert_called_once()
+        run.assert_not_called()
+
+
 def test_daily_scheduled_flow_uses_today_ids_before_gate(tmp_path):
     fire=datetime(2030,1,1,12,tzinfo=CN)
     rows=[row('仙林体育馆3楼6号场',available=False)]

@@ -99,8 +99,8 @@ def startup_lock():
 
 
 def main():
-    from local_session import protect_dir, BACKUP, restore
-    protect_dir()
+    from local_session import BACKUP, restore
+    (ROOT/'private').mkdir(exist_ok=True)
     with startup_lock():
         print('正在检查本项目旧进程…',flush=True)
         count=stop_owned()
@@ -108,7 +108,7 @@ def main():
             print(f'已关闭本项目旧进程 {count} 个。若曾提交订单，请先核对；未知状态不会清空。',flush=True)
         if BACKUP.exists():
             restore()
-        print('正在打开助手（无需启动时探测8080；抓包时才检查端口）…',flush=True)
+        print('正在打开菜单…',flush=True)
         proc=subprocess.Popen([sys.executable,str(ROOT/'app.py')],cwd=ROOT)
     code=proc.wait()
     # Replacement on Windows terminates the app: exit old launcher without leaving a pause prompt.
