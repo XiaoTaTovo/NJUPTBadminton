@@ -9,6 +9,7 @@ from api import Client, ROOT, SafeError, now_cn, CN
 from booking import validate, run, atomic
 from preferences import tier, label, ordered, RULE
 from user_help import GROUP_HELP, MENU, show_help
+from scheduling import wait_for_start
 
 PRIVATE=ROOT/'private'
 PLAN=PRIVATE/'plan.json'
@@ -118,13 +119,17 @@ def execute(scheduled=False):
             remaining=(fire-now_cn()).total_seconds()
             if c.claims['exp']<=time.time()+remaining+300:
                 raise SafeError('凭据无法覆盖启动时间，请先刷新。')
-            deadline=time.monotonic()+remaining
-            print('等待本机北京时间启动；不按秒级 HTTP Date 自动提前提交。请保持电脑唤醒。')
-            while time.monotonic()<deadline:
-                left=deadline-time.monotonic()
-                time.sleep(min(1,max(0,left)))
-            if (now_cn()-fire).total_seconds()>3:
-                raise SafeError('可能休眠/时钟变化，错过启动窗口，拒绝补跑。')
+            print('等待北京时间启动；距启动约20秒做一次只读预热，不提前提交预约。')
+            schedule={'scheduled_at':fire.isoformat(),'state':'waiting'}
+            atomic(PRIVATE/'latest-schedule.json',schedule)
+            try:
+                schedule.update(wait_for_start(fire,c.types))
+                schedule['state']='triggered'
+            except Exception as exc:
+                schedule.update(state='failed',error_type=type(exc).__name__)
+                raise
+            finally:
+                atomic(PRIVATE/'latest-schedule.json',schedule)
         result=run(plan,c)
         print('本轮状态：',result['state'],'；成功数量：',sum(result['completed'].values()))
         print('未自动支付、取消或查询订单。请在小程序核对；结果未知必须人工处理。')

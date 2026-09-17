@@ -42,7 +42,7 @@ def validate(plan):
             same_window = (left['date'], left['start'], left['end']) == (right['date'], right['start'], right['end'])
             same_candidates = set(left['courts']) == set(right['courts'])
             if same_window and same_candidates:
-                raise SafeError('同一日期和时段的目标组候选有重叠；如果要两场，请合并成一个目标组并把数量填2，避免服务端按重复预约拒绝。')
+                raise SafeError('同一日期和时段的目标组候选有重叠；如果要两场，请合并成一个目标组并把数量填2，这是输入防误操作检查，不表示已经证实服务端会因两组配置拒绝。')
     total = sum(g['quantity'] for g in groups)
     if type(plan.get('max_orders')) is not int or not 1<=plan['max_orders']<=6 or total>plan['max_orders']:
         raise SafeError('订单上限 1..6，且须覆盖所有目标数量。')
@@ -139,7 +139,7 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
     with exclusive(private):
         prior=existing_keys(private)
         plan_id=str(uuid.uuid4())
-        record={'run_id':plan_id,'created_at':now_cn().isoformat(),'plan':plan,'attempts':[], 'state':'running'}
+        record={'run_id':plan_id,'created_at':now_cn().isoformat(),'plan':plan,'attempts':[], 'observations':[], 'state':'running'}
         path=private/('run-'+plan_id+'.json')
         atomic(path,record)
         completed={}; attempted=set(prior); counts={}; exhausted=set()
@@ -153,6 +153,14 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60):
                     if time.monotonic()>=deadline:
                         break
                     found.extend(client.slots(date))
+                observation={'observed_at':now_cn().isoformat(),'targets':[]}
+                for g in plan['targets']:
+                    matching=[s for s in found if s['date']==g['date'] and s['start']==g['start'] and s['end']==g['end'] and s['name'] in g['courts']]
+                    observation['targets'].append({'target':g['id'],'matched':len(matching),
+                        'available':sum(s['available'] for s in matching),
+                        'unattempted_available':sum(s['available'] and slot_key(s) not in attempted for s in matching)})
+                record['observations'].append(observation)
+                atomic(path,record)
                 # Restore credit for previously successful matching slots, without rebooking.
                 historical = [dict(s, available=s['available'] or slot_key(s) in prior) for s in found]
                 credited = set()

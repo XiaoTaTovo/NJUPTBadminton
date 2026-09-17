@@ -1,6 +1,7 @@
 """Live API adapter. No payment, cancellation, auth bypass or automatic HTTP retries."""
 import base64
 import hashlib
+import re
 import json
 import time
 from email.utils import parsedate_to_datetime
@@ -23,21 +24,23 @@ def classify_rejection(err_code, message):
     msg = str(message or '').strip()
     if err_code == 5004 or any(x in msg for x in ('登录', 'token', 'TOKEN', '认证')):
         category = 'login_expired'
-    elif any(x in msg for x in ('未支付', '待支付', '订单上限', '预约上限', '超限')):
+    elif any(x in msg for x in ('未支付', '待支付')):
         category = 'unpaid_order_limit'
-    elif any(x in msg for x in ('频繁', '限流', '稍后', '过快', '请求过多')):
+    elif any(x in msg for x in ('订单上限', '预约上限', '超限', '权限')):
+        category = 'account_limit'
+    elif any(x in msg for x in ('频繁', '限流', '过快', '请求过多')):
         category = 'rate_limit'
     elif any(x in msg for x in ('验证码', '风控', '安全验证')):
         category = 'verification_required'
-    elif any(x in msg for x in ('已被预约', '已被预订', '已被他人', '已约满', '已满', '已被占用', '无余量', '不可用', '售罄')):
+    elif any(x in msg for x in ('已被预约', '已被预订', '已被他人', '已约满', '已满', '已被占用', '无余量', '售罄')):
         category = 'sold_out'
-    elif any(x in msg for x in ('重复', '同一时段', '时间段', '每人', '不能同时', '不允许', '预约失败')):
+    elif any(x in msg for x in ('重复预约', '同一时段', '每人', '不能同时', '不允许预约')):
         category = 'booking_rule_rejected'
     else:
         category = 'server_rejected_unknown'
     return {
         'category': category,
-        'err_code': err_code,
+        'err_code': err_code if type(err_code) is int and abs(err_code)<1000000000 else (err_code if isinstance(err_code,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,24}',err_code) else None),
         'message_length': len(msg),
         'message_digest': hashlib.sha256(msg.encode('utf-8')).hexdigest()[:12] if msg else None,
     }
