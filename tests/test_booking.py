@@ -95,6 +95,18 @@ class EngineTests(unittest.TestCase):
             run(plan(),f,td,lambda _:None,max_reads=2)
             run(plan(),f,td,lambda _:None,max_reads=2)
             self.assertEqual(len(f.calls),1)
+    def test_cancel_confirmation_only_clears_old_success(self):
+        import time
+        f=Fake([slot()])
+        with tempfile.TemporaryDirectory() as td:
+            run(plan(),f,td,lambda _:None,max_reads=1)
+            p=Path(td)/'cancelled-confirmations.json'
+            p.write_text(json.dumps({slot_key(slot()):time.time()}))
+            self.assertNotIn(slot_key(slot()),existing_keys(Path(td)))
+            run(plan(),f,td,lambda _:None,max_reads=1)
+            self.assertIn(slot_key(slot()),existing_keys(Path(td)))
+            run(plan(),f,td,lambda _:None,max_reads=1)
+            self.assertEqual(len(f.calls),2)
     def test_lock_rejects_concurrency(self):
         with tempfile.TemporaryDirectory() as td:
             with exclusive(Path(td)):

@@ -99,12 +99,16 @@ def exclusive(private):
 
 def existing_keys(private):
     keys=set()
+    acknowledgement=private/'cancelled-confirmations.json'
+    cutoffs=json.loads(acknowledgement.read_text(encoding='utf-8')) if acknowledgement.exists() else {}
+    def retained(slot, submitted_at):
+        return float(submitted_at or 0)>float(cutoffs.get(slot_key(slot), -1))
     for path in private.glob('run-*.json'):
         run=json.loads(path.read_text(encoding='utf-8'))
         for a in run.get('attempts',[]):
             if a['state'] in ('unknown','submitting'):
                 raise SafeError('历史预约结果未知，须先人工核对订单；禁止重新提交。')
-            if a['state']=='success':
+            if a['state']=='success' and retained(a['slot'], a.get('submitted_at')):
                 keys.add(slot_key(a['slot']))
     # One-shot development test from the initial integration. Never echo its raw response.
     legacy=private/'single-test.json'
@@ -114,7 +118,8 @@ def existing_keys(private):
             raise SafeError('早期单笔测试结果未知，请先人工核对。')
         if obj.get('state')=='server_reported_success':
             s=obj['target'].copy(); s['start']=s['start'][:5]; s['end']=s['end'][:5]
-            keys.add(slot_key(s))
+            if retained(s, obj.get('submitted_at')):
+                keys.add(slot_key(s))
     return keys
 
 

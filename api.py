@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import time
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import requests
@@ -44,11 +45,32 @@ class Client:
         time.sleep(max(0, 1-(time.monotonic()-self.last_request)))
         self.last_request = time.monotonic()
         wall = time.time()
-        r = self.http.request(method, BASE+path, timeout=(5, 8), allow_redirects=False, **kwargs)
-        elapsed = (time.monotonic()-self.last_request)*1000
-        self.timings.append({'method':method, 'rtt_ms':round(elapsed,2), 'http_status':r.status_code,
-                             'http_date':r.headers.get('Date'), 'local_send':wall})
-        return r
+        endpoint = 'booking' if '/booking/' in path else 'slots' if '/time/display/' in path else 'types'
+        event = {'method':method, 'endpoint':endpoint, 'local_send':wall,
+                 'rtt_ms':None, 'http_status':None, 'http_date':None}
+        try:
+            r = self.http.request(method, BASE+path, timeout=(5, 8), allow_redirects=False, **kwargs)
+            event.update(http_status=r.status_code, http_date=r.headers.get('Date'))
+            retry = r.headers.get('Retry-After', '')
+            try:
+                seconds = int(retry) if retry.isdigit() else max(0, int(parsedate_to_datetime(retry).timestamp()-time.time()))
+                event['retry_after_seconds'] = seconds
+            except (ValueError, TypeError, OverflowError):
+                pass
+            return r
+        except Exception as exc:
+            event['error_type'] = type(exc).__name__
+            raise
+        finally:
+            event['rtt_ms'] = round((time.monotonic()-self.last_request)*1000, 2)
+            self.timings.append(event)
+            try:
+                # No URL parameters, headers, credential values or response bodies.
+                with (ROOT/'private/request-events.jsonl').open('a',encoding='utf-8') as f:
+                    f.write(json.dumps(event,ensure_ascii=False)+'\n')
+            except OSError:
+                # Never turn a successful POST into an exception because logging failed.
+                print('请求日志写入失败；当前请求结果仍按服务端响应处理。')
 
     def get_list(self, path, **kwargs):
         r = self.request('GET', path, **kwargs)
