@@ -85,16 +85,15 @@ def test_explicit_soldout_alternative_spelling():
     assert classify_rejection(123,'该场地已被预定')['category']=='sold_out'
 
 
-def test_unknown_rejection_only_reads_then_stops(tmp_path):
+def test_blocked_result_stops_without_further_requests(tmp_path):
     row=dict(id='test-slot',name='A',date='2030-01-01',start='19:00',end='20:00',available=True)
     plan=dict(version=2,targets=[dict(id='g',date=row['date'],start=row['start'],end=row['end'],courts=['A'],quantity=1)],max_orders=1)
     c=MagicMock();c.timings=[]
     c.submit.return_value=dict(state='blocked',reason='server_rejected_unknown',err_code=7070)
     c.slots.return_value=[dict(row,available=False)]
     result=booking.run(plan,c,tmp_path,lambda _:None,prepared=[row],context={'mode':'scheduled'})
-    c.submit.assert_called_once();c.slots.assert_called_once()
+    c.submit.assert_called_once();c.slots.assert_not_called()
     assert result['state']=='blocked'
-    assert result['attempts'][0]['post_rejection_read']['available_count']==0
     assert result['context']['mode']=='scheduled'
 
 
@@ -137,7 +136,7 @@ def test_two_scheduled_hours_submit_without_intermediate_get(tmp_path):
     assert [call.args[0]['start'] for call in c.submit.call_args_list]==['19:00','20:00']
 
 
-def test_scheduled_explicit_soldout_refreshes_before_next_post(tmp_path):
+def test_scheduled_explicit_soldout_uses_next_prepared_candidate(tmp_path):
     names=['仙林体育馆3F羽毛球馆6号场地','仙林体育馆3F羽毛球馆9号场地（单打）']
     rows=[dict(id=str(i),name=name,date='2030-01-01',start='19:00',end='20:00',available=True) for i,name in enumerate(names)]
     settings={'windows':[dict(start='19:00',end='20:00',quantity=1)],'priority':daily.DEFAULT['priority']}
@@ -149,5 +148,52 @@ def test_scheduled_explicit_soldout_refreshes_before_next_post(tmp_path):
     def slots(date):events.append('GET');return [dict(rows[0],available=False),rows[1]]
     c.submit.side_effect=submit;c.slots.side_effect=slots
     result=booking.run(plan,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
-    assert events==['POST','GET','POST']
+    assert events==['POST','POST']
     assert result['state']=='complete'
+
+def test_7070_explicit_false_advances_to_next_candidate(tmp_path):
+    names=['仙林体育馆3F羽毛球馆6号场地','仙林体育馆3F羽毛球馆1号场地']
+    rows=[dict(id=str(i),name=name,date='2030-01-01',start='19:00',end='20:00',available=True) for i,name in enumerate(names)]
+    settings={'windows':[dict(start='19:00',end='20:00',quantity=1)],'priority':daily.DEFAULT['priority']}
+    plan,_=daily.build_plan(settings,rows,'2030-01-01')
+    adapter=object.__new__(Client);adapter.claims={'studentId':'synthetic'}
+    adapter.request=MagicMock(return_value=MagicMock(status_code=200,json=lambda:{'success':False,'errCode':7070,'errMsg':'陌生错误'}))
+    rejection=adapter.submit(rows[0])
+    assert rejection['state']=='rejected'
+    c=MagicMock();c.timings=[];c.submit.side_effect=[rejection,dict(state='success')]
+    result=booking.run(plan,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
+    assert result['state']=='complete'
+    assert [x.args[0]['id'] for x in c.submit.call_args_list]==['0','1']
+    c.slots.assert_not_called()
+
+
+@pytest.mark.parametrize('body,expected',[
+    ({'success':False,'errCode':7070,'errMsg':'请求过于频繁'},'blocked'),
+    ({'success':False,'errCode':7070,'errMsg':'已有待支付订单'},'blocked'),
+    ({'success':False,'errCode':5004,'errMsg':''},'blocked'),
+    ({'success':False,'errCode':7070,'errMsg':'需要安全验证'},'blocked'),
+    ({'success':False,'errCode':7070,'data':{'order':{'orderId':'synthetic'}}},'unknown'),
+    ({'errCode':7070},'unknown'),
+    ({'success':'false','errCode':7070},'unknown'),
+])
+def test_fallback_does_not_ignore_account_or_ambiguous_results(body,expected):
+    c=object.__new__(Client);c.claims={'studentId':'synthetic'}
+    c.request=MagicMock(return_value=MagicMock(status_code=200,json=lambda:body))
+    assert c.submit(dict(id='s',date='2030-01-01'))['state']==expected
+
+
+def test_failed_candidates_do_not_prevent_second_window(tmp_path):
+    rows=[]
+    for i,(start,end) in enumerate([('19:00','20:00'),('20:00','21:00')]):
+        for n in [6,1]:
+            rows.append(dict(id=f'{i}-{n}',name=f'仙林体育馆3F羽毛球馆{n}号场地',date='2030-01-01',start=start,end=end,available=True))
+    plan,_=daily.build_plan(daily.DEFAULT,rows,'2030-01-01')
+    c=MagicMock();c.timings=[]
+    def submit(row):
+        return dict(state='rejected',definitive_rejection=True,err_code=7070) if row['id'].endswith('-6') else dict(state='success')
+    c.submit.side_effect=submit
+    result=booking.run(plan,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
+    assert result['state']=='complete'
+    assert list(result['completed'].values())==[1,1]
+    assert len(set(x.args[0]['id'] for x in c.submit.call_args_list))==4
+    c.slots.assert_not_called()

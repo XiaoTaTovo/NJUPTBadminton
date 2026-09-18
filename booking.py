@@ -44,8 +44,8 @@ def validate(plan):
             if same_window and same_candidates:
                 raise SafeError('同一日期和时段的目标组候选有重叠；如果要两场，请合并成一个目标组并把数量填2，这是输入防误操作检查，不表示已经证实服务端会因两组配置拒绝。')
     attempts=plan.get('max_attempts_per_target',3)
-    if type(attempts) is not int or not 1<=attempts<=20:
-        raise SafeError('每组尝试上限必须为1–20。')
+    if type(attempts) is not int or not 1<=attempts<=30:
+        raise SafeError('每组尝试上限必须为1–30。')
     total = sum(g['quantity'] for g in groups)
     if type(plan.get('max_orders')) is not int or not 1<=plan['max_orders']<=6 or total>plan['max_orders']:
         raise SafeError('订单上限 1..6，且须覆盖所有目标数量。')
@@ -135,7 +135,7 @@ def existing_keys(private):
     return keys
 
 
-def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, prepared=None, before_first_submit=None, context=None):
+def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, prepared=None, before_first_submit=None, context=None):
     validate(plan)
     private=Path(private or ROOT/'private')
     private.mkdir(exist_ok=True)
@@ -152,6 +152,8 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, 
         prepared_batch=prepared is not None and before_first_submit is not None
         try:
             for _ in range(max_reads):
+                if all(completed.get(g['id'],0)>=g['quantity'] or g['id'] in exhausted for g in plan['targets']):
+                    break
                 if time.monotonic()>=deadline:
                     break
                 found=[]
@@ -225,27 +227,22 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, 
                 if a['state']=='success':
                     if prepared_batch:
                         # Distinct configured time slots already have IDs. Reuse them after a
-                        # confirmed success; explicit sold-out instead forces a fresh GET.
+                        # confirmed success; explicit rejections also advance through prepared IDs.
                         prepared=found
                     completed[group['id']]=completed.get(group['id'],0)+1
                     notify('\a预约接口返回成功：'+slot['name']+' '+slot['date']+' '+slot['start']+'–'+slot['end']+'；请立即到小程序核对并付款（五分钟为估计，以页面为准）。')
                 elif a['state'] in ('unknown','blocked'):
                     record['state']=a['state']
-                    if a.get('reason')=='server_rejected_unknown' and time.monotonic()<deadline:
-                        # A fresh availability snapshot is diagnosis, NOT proof that no order exists.
-                        # Keep stopped even if the rejected slot now appears unavailable.
-                        try:
-                            fresh=client.slots(slot['date'])
-                            matching=[s for s in fresh if s['date']==slot['date'] and s['start']==slot['start'] and s['end']==slot['end'] and s['name']==slot['name']]
-                            a['post_rejection_read']={'observed_at':now_cn().isoformat(),
-                                'matched_count':len(matching), 'available_count':sum(s['available'] for s in matching),
-                                'same_id_present':any(str(s['id'])==str(slot['id']) for s in matching),
-                                'meaning':'availability_only_not_order_verification'}
-                        except Exception as exc:
-                            a['post_rejection_read']={'error_type':type(exc).__name__}
                     notify('停止：'+a['reason']+'；错误码 '+str(a.get('err_code','未知'))+'。已有订单保留，不自动取消或重试。')
                     break
-                elif a['state']!='sold_out':
+                elif a['state'] in ('sold_out','rejected'):
+                    if a['state']=='rejected' and a.get('definitive_rejection') is not True:
+                        a.update(state='unknown',reason='unverified_rejection')
+                        record['state']='unknown'; break
+                    if prepared_batch:
+                        prepared=found
+                    notify('本候选被明确拒绝，按优先级尝试下一候选（不重复本场次）；错误码 '+str(a.get('err_code','未提供'))+'。')
+                else:
                     record['state']='unknown'; break
                 if counts[group['id']]>=plan.get('max_attempts_per_target',max(3,group['quantity'])):
                     exhausted.add(group['id'])

@@ -22,11 +22,11 @@ def now_cn():
 def classify_rejection(err_code, message):
     """Map server text to a safe operational category; never persist the raw text."""
     msg = str(message or '').strip()
-    if err_code == 5004 or any(x in msg for x in ('登录', 'token', 'TOKEN', '认证')):
+    if str(err_code) == '5004' or any(x in msg for x in ('登录', 'token', 'TOKEN', '认证')):
         category = 'login_expired'
     elif any(x in msg for x in ('未支付', '待支付')):
         category = 'unpaid_order_limit'
-    elif any(x in msg for x in ('订单上限', '预约上限', '超限', '权限')):
+    elif any(x in msg for x in ('订单上限', '预约上限', '数量上限', '最多预约2', '最多预约两', '只能预约2', '只能预约两', '超限', '权限')):
         category = 'account_limit'
     elif any(x in msg for x in ('频繁', '限流', '过快', '请求过多')):
         category = 'rate_limit'
@@ -171,12 +171,26 @@ class Client:
                         'price':d.get('price'), 'raw_status':d.get('status')}
             if b.get('success') is not False:
                 return {'state':'unknown','reason':'unrecognized_response'}
+            # An explicit rejection can still carry conflicting order data. Never retry
+            # such a response until the user checks orders.
+            def has_order(value):
+                if isinstance(value,dict):
+                    return any((str(k).lower() in ('orderid','order_id','order','detail') and bool(v))
+                               or has_order(v) for k,v in value.items())
+                if isinstance(value,list):
+                    return any(has_order(v) for v in value)
+                return False
+            if has_order(b):
+                return {'state':'unknown','reason':'rejection_contains_order_evidence'}
             rejection = classify_rejection(b.get('errCode'), b.get('errMsg'))
             category = rejection['category']
-            if category == 'sold_out':
-                return {'state':'sold_out', 'reason':'explicit_unavailable', **rejection}
-            # Every other business rejection stops. We retain only a safe category/code/digest,
-            # so the next diagnosis can distinguish a rule rejection from a rate limit without logging credentials or raw text.
-            return {'state':'blocked', 'reason':category, **rejection}
+            if category in ('login_expired','unpaid_order_limit','account_limit',
+                            'rate_limit','verification_required','booking_rule_rejected'):
+                return {'state':'blocked', 'reason':category, **rejection}
+            # No hard-coded meaning for 7070. Explicit success:false, no order evidence,
+            # and no recognized account/security stop permits a DIFFERENT candidate.
+            return {'state':'sold_out' if category=='sold_out' else 'rejected',
+                    'reason':'explicit_unavailable' if category=='sold_out' else 'explicit_business_rejection',
+                    'definitive_rejection':True, **rejection}
         except Exception:
             return {'state':'unknown','reason':'transport_or_schema_error'}

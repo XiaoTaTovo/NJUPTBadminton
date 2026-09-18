@@ -13,7 +13,7 @@ import uuid
 
 SETTINGS=ROOT/'private/daily-settings.json'
 DEFAULT={'version':1,'windows':[{'start':'19:00','end':'20:00','quantity':1},{'start':'20:00','end':'21:00','quantity':1}],
-         'priority':DEFAULT_PRIORITY,'max_attempts_per_target':20}
+         'priority':DEFAULT_PRIORITY,'max_attempts_per_target':30}
 
 
 def validate_settings(settings):
@@ -67,7 +67,7 @@ def build_plan(settings, rows, date):
         targets.append({'id':f'daily-{i}','date':date,**w,'courts':names,'priority':settings['priority']})
         prepared.extend(matches)
     plan={'version':2,'targets':targets,'max_orders':sum(w['quantity'] for w in settings['windows']),
-          'max_attempts_per_target':20}
+          'max_attempts_per_target':30}
     return validate(plan),prepared
 
 

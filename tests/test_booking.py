@@ -142,7 +142,7 @@ class ResponseTests(unittest.TestCase):
         c=self.client();c.request.side_effect=TimeoutError
         self.assertEqual(c.submit(slot())['state'],'unknown');c.request.assert_called_once()
     def test_classification(self):
-        for body,state in [({'success':False,'errMsg':'已有未支付订单，预约超限'},'blocked'),({'success':False,'errMsg':'场地已被预约'},'sold_out'),({'success':False,'errMsg':'陌生错误'},'blocked'),({},'unknown')]:
+        for body,state in [({'success':False,'errMsg':'已有未支付订单，预约超限'},'blocked'),({'success':False,'errMsg':'场地已被预约'},'sold_out'),({'success':False,'errMsg':'陌生错误'},'rejected'),({},'unknown')]:
             self.assertEqual(self.client(body).submit(slot())['state'],state)
 
 if __name__=='__main__':unittest.main()
