@@ -61,10 +61,21 @@ class Client:
         self.http.trust_env = False
         self.http.headers['token'] = token
         self.http.proxies = {'https': 'http://127.0.0.1:7897'}
-        self.type_id = None
+        self.type_id = self.cached_type_id()
         self.timings = []
         self.last_request = -float('inf')
         self.clock_time = time.time
+
+    @staticmethod
+    def cached_type_id():
+        try:
+            saved=json.loads((ROOT/'private/venue-type.json').read_text(encoding='utf-8'))
+            value=saved.get('type_id')
+            if saved.get('base')==BASE and isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',value):
+                return value
+        except (OSError,ValueError,AttributeError):
+            pass
+        return None
 
     def close(self):
         self.http.close()
@@ -122,6 +133,16 @@ class Client:
         if len(matches) != 1:
             raise SafeError('羽毛球类型无法唯一识别。')
         self.type_id = str(matches[0]['id'])
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',self.type_id):
+            raise SafeError('类型标识格式异常，停止请求。')
+        try:
+            import uuid
+            path=ROOT/'private/venue-type.json'
+            tmp=path.with_name('venue-type-'+uuid.uuid4().hex+'.tmp')
+            tmp.write_text(json.dumps({'base':BASE,'type_id':self.type_id},ensure_ascii=False),encoding='utf-8')
+            tmp.replace(path)
+        except OSError:
+            print('类型缓存写入失败，本次仍可使用已查询的类型。')
         return rows
 
     def slots(self, date):

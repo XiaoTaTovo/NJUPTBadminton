@@ -197,3 +197,30 @@ def test_failed_candidates_do_not_prevent_second_window(tmp_path):
     assert list(result['completed'].values())==[1,1]
     assert len(set(x.args[0]['id'] for x in c.submit.call_args_list))==4
     c.slots.assert_not_called()
+
+
+def test_cached_type_id_avoids_startup_types(tmp_path):
+    import api
+    (tmp_path/'private').mkdir()
+    (tmp_path/'private/venue-type.json').write_text(json.dumps({'base':api.BASE,'type_id':'badminton-type'}),encoding='utf-8')
+    with patch.object(api,'ROOT',tmp_path):
+        assert api.Client.cached_type_id()=='badminton-type'
+
+
+def test_slots_uses_cached_type_without_types_request(tmp_path):
+    import api
+    (tmp_path/'private').mkdir()
+    (tmp_path/'private/venue-type.json').write_text(json.dumps({'base':api.BASE,'type_id':'badminton-type'}),encoding='utf-8')
+    c=object.__new__(api.Client);c.type_id='badminton-type';c.timings=[];c.last_request=-float('inf');c.clock_time=lambda:0
+    c.get_list=MagicMock(return_value=[{'localDate':'2030-01-01','timeFields':[]}])
+    with patch.object(api,'ROOT',tmp_path):
+        c.slots('2030-01-01')
+    c.get_list.assert_called_once_with('/venue/user/time/display/badminton-type',params={'date':'2030-01-01'})
+
+
+def test_scheduled_gate_can_wait_without_warmup_network_call():
+    ticks=[0.0]; fire=datetime(2030,1,1,12,tzinfo=CN); base=fire-timedelta(seconds=5)
+    def now():return base+timedelta(seconds=ticks[0])
+    def sleep(n):ticks[0]+=n
+    info=wait_for_start(fire,None,now=now,monotonic=lambda:ticks[0],sleep=sleep)
+    assert info['warmup']=='disabled'

@@ -8,8 +8,8 @@ def wait_for_start(fire, warmup, now=now_cn, monotonic=time.monotonic, sleep=tim
     if remaining<=0:
         raise SafeError('确认时启动时间已过，拒绝补跑。')
     deadline=monotonic()+remaining
-    info={'scheduled_at':fire.isoformat(),'warmup':'skipped_near_start'}
-    if remaining>20:
+    info={'scheduled_at':fire.isoformat(),'warmup':'disabled' if warmup is None else 'skipped_near_start'}
+    if remaining>20 and warmup is not None:
         while deadline-monotonic()>20:
             sleep(min(1,deadline-monotonic()-20))
         if abs((fire-now()).total_seconds()-(deadline-monotonic()))>2:

@@ -111,4 +111,4 @@ def test_daily_scheduled_flow_uses_today_ids_before_gate(tmp_path):
     (tmp_path/'private').mkdir()
     with patch('daily.calibrate',return_value=clock),patch('daily.ROOT',tmp_path),patch('daily.load_settings',return_value=settings()),patch('daily.now_cn',return_value=fire-timedelta(seconds=55)),patch('daily.Client',Client),patch('daily.wait_until_prefetch'),patch('daily.wait_for_start',side_effect=wait),patch('daily.run',side_effect=run):
         daily.execute(confirm=lambda _: '1')
-    assert events==['types','slots','gate','close']
+    assert events==['slots','gate','close']

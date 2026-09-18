@@ -118,11 +118,8 @@ def execute(immediate=False, confirm=input):
                 raise SafeError('校准后已过今天12点，停止，不自动补跑。')
         if not immediate and c.claims['exp']<=fire.timestamp()+300:
             raise SafeError('凭据不能覆盖12点后五分钟，请临近开抢刷新一次。')
-        phase='authentication'
-        c.types()  # early authentication, not a booking
         if not immediate:
             print('等待提前一分钟准备；无需反复点击启动。',flush=True)
-            clock.check_gateway(c.timings[-1] if c.timings else None)
             phase='prefetch_wait'
             wait_until_prefetch(fire,now=clock.now)
             if clock.age()>120:
@@ -131,6 +128,8 @@ def execute(immediate=False, confirm=input):
                 wait_until_prefetch(fire,now=clock.now)
         phase='prepare_slots'
         rows=c.slots(date)
+        if clock:
+            clock.check_gateway(c.timings[-1] if c.timings else None)
         prepared_at=clock.now() if clock else now_cn()
         plan,prepared=build_plan(settings,rows,date)
         snapshot={'prepared_at':prepared_at.isoformat(),'date':date,'plan':plan,'slots':prepared}
@@ -147,11 +146,8 @@ def execute(immediate=False, confirm=input):
             prepared=[dict(s,observed_available=s['available'],available=True) for s in prepared]
             print('当天场次已准备；开抢前不把false快照认定为永久售罄。首笔用预备ID，到点不再GET。',flush=True)
             context['clock']=clock.info
-            def warmup():
-                c.types()
-                clock.check_gateway(c.timings[-1] if c.timings else None)
             def gate():
-                info=wait_for_start(fire,warmup,now=clock.now)
+                info=wait_for_start(fire,None,now=clock.now)
                 info.update(prepared_at=prepared_at.isoformat(),first_post_uses_prefetched_id=True)
                 return info
         else:
