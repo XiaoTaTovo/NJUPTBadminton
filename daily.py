@@ -8,9 +8,11 @@ from api import ROOT, Client, SafeError, CN, now_cn
 from booking import atomic, run, validate
 from preferences import DEFAULT_PRIORITY, tier, rank, court_number
 from scheduling import wait_for_start
+from clock_sync import calibrate
+import uuid
 
 SETTINGS=ROOT/'private/daily-settings.json'
-DEFAULT={'version':1,'windows':[{'start':'19:00','end':'20:00','quantity':1}],
+DEFAULT={'version':1,'windows':[{'start':'19:00','end':'20:00','quantity':1},{'start':'20:00','end':'21:00','quantity':1}],
          'priority':DEFAULT_PRIORITY,'max_attempts_per_target':20}
 
 
@@ -100,18 +102,41 @@ def execute(immediate=False, confirm=input):
     print('本次：'+('今天立即提交' if immediate else f'{date} 11:59前后准备场次，12:00直接提交首选'))
     if confirm('1（确认本次真实预约，不付款） 0/回车（返回）：').strip()!='1':
         return None
-    c=Client()
+    c=None
+    phase='credentials'
+    context={'mode':'immediate' if immediate else 'scheduled'}
     try:
+        c=Client()
+        clock=None
+        if not immediate:
+            print('只读校准参考时间（不修改Windows时钟）…',flush=True)
+            phase='clock_calibration'
+            clock=calibrate()
+            c.clock_time=clock.timestamp
+            print(f'参考时间相对本机偏差 {clock.offset:+.3f} 秒；按校准后12点触发，不按未校准本机时间。',flush=True)
+            if clock.now()>=fire:
+                raise SafeError('校准后已过今天12点，停止，不自动补跑。')
         if not immediate and c.claims['exp']<=fire.timestamp()+300:
             raise SafeError('凭据不能覆盖12点后五分钟，请临近开抢刷新一次。')
+        phase='authentication'
         c.types()  # early authentication, not a booking
         if not immediate:
             print('等待提前一分钟准备；无需反复点击启动。',flush=True)
-            wait_until_prefetch(fire)
+            clock.check_gateway(c.timings[-1] if c.timings else None)
+            phase='prefetch_wait'
+            wait_until_prefetch(fire,now=clock.now)
+            if clock.age()>120:
+                clock=calibrate()
+                c.clock_time=clock.timestamp
+                wait_until_prefetch(fire,now=clock.now)
+        phase='prepare_slots'
         rows=c.slots(date)
-        prepared_at=now_cn()
+        prepared_at=clock.now() if clock else now_cn()
         plan,prepared=build_plan(settings,rows,date)
         snapshot={'prepared_at':prepared_at.isoformat(),'date':date,'plan':plan,'slots':prepared}
+        evidence='prepared-'+uuid.uuid4().hex+'.json'
+        atomic(ROOT/'private'/evidence,snapshot)
+        context['preparation_file']=evidence
         atomic(ROOT/'private/prepared-today.json',snapshot)
         atomic(ROOT/'private/plan.json',plan)
         if not immediate:
@@ -119,19 +144,32 @@ def execute(immediate=False, confirm=input):
                 raise SafeError('场次准备完成时距12点不足3秒，停止，避免把超时准备误当准点提交。')
             # Before release, availability can mean "not open yet". IDs must still be returned
             # for TODAY; server remains authoritative and every POST may be rejected.
-            prepared=[dict(s,available=True) for s in prepared]
+            prepared=[dict(s,observed_available=s['available'],available=True) for s in prepared]
             print('当天场次已准备；开抢前不把false快照认定为永久售罄。首笔用预备ID，到点不再GET。',flush=True)
+            context['clock']=clock.info
+            def warmup():
+                c.types()
+                clock.check_gateway(c.timings[-1] if c.timings else None)
             def gate():
-                info=wait_for_start(fire,c.types)
+                info=wait_for_start(fire,warmup,now=clock.now)
                 info.update(prepared_at=prepared_at.isoformat(),first_post_uses_prefetched_id=True)
                 return info
         else:
             gate=None
-        result=run(plan,c,prepared=prepared,before_first_submit=gate)
+        phase='booking_engine'
+        result=run(plan,c,prepared=prepared,before_first_submit=gate,context=context)
         print('本轮结果：',result['state'],'；已满足场数：',sum(result['completed'].values()))
         return result
+    except BaseException as exc:
+        try:
+            atomic(ROOT/'private'/('launch-failure-'+uuid.uuid4().hex+'.json'),
+                   {'local_time':now_cn().isoformat(),'phase':phase,'context':context,'error_type':type(exc).__name__})
+        except OSError:
+            pass
+        raise
     finally:
-        c.close()
+        if c is not None:
+            c.close()
 
 
 def change_windows():

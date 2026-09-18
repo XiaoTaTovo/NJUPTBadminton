@@ -32,7 +32,7 @@ def classify_rejection(err_code, message):
         category = 'rate_limit'
     elif any(x in msg for x in ('验证码', '风控', '安全验证')):
         category = 'verification_required'
-    elif any(x in msg for x in ('已被预约', '已被预订', '已被他人', '已约满', '已满', '已被占用', '无余量', '售罄')):
+    elif any(x in msg for x in ('已被预约', '已被预订', '已被预定', '已被他人', '已约满', '已满', '已被占用', '无余量', '售罄')):
         category = 'sold_out'
     elif any(x in msg for x in ('重复预约', '同一时段', '每人', '不能同时', '不允许预约')):
         category = 'booking_rule_rejected'
@@ -41,6 +41,7 @@ def classify_rejection(err_code, message):
     return {
         'category': category,
         'err_code': err_code if type(err_code) is int and abs(err_code)<1000000000 else (err_code if isinstance(err_code,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,24}',err_code) else None),
+        'message_terms': [term for term in ('场地','场次','预约','预定','预订','时间','开始','结束','未开放','过期','签名','校验','失败','刷新','重试','抢先','手慢','繁忙','占用','满','频繁','锁定') if term in msg],
         'message_length': len(msg),
         'message_digest': hashlib.sha256(msg.encode('utf-8')).hexdigest()[:12] if msg else None,
     }
@@ -63,6 +64,7 @@ class Client:
         self.type_id = None
         self.timings = []
         self.last_request = -float('inf')
+        self.clock_time = time.time
 
     def close(self):
         self.http.close()
@@ -74,9 +76,13 @@ class Client:
             time.sleep(delay)
         self.last_request = time.monotonic()
         wall = time.time()
+        data_factory=kwargs.pop('data_factory',None)
+        if data_factory is not None:
+            kwargs['data']=data_factory()
         endpoint = 'booking' if '/booking/' in path else 'slots' if '/time/display/' in path else 'types'
         event = {'method':method, 'endpoint':endpoint, 'local_send':wall,
-                 'rtt_ms':None, 'http_status':None, 'http_date':None}
+                 'rtt_ms':None, 'http_status':None, 'http_date':None,
+                 'corrected_send':getattr(self,'clock_time',time.time)()}
         try:
             r = self.http.request(method, BASE+path, timeout=(5, 8), allow_redirects=False, **kwargs)
             event.update(http_status=r.status_code, http_date=r.headers.get('Date'))
@@ -140,12 +146,13 @@ class Client:
         sid = self.claims.get('studentId') or ui.get('studentId')
         if not sid:
             return {'state':'blocked', 'reason':'missing_local_identity'}
-        ts = str(int(time.time()*1000))
-        # Protocol signature observed in the reference repository and verified in one live test.
-        fingerprint = hashlib.sha256(f"{slot['id']}|{sid}|{slot['date']}|{ts}|4pGmY6s9zX".encode()).hexdigest()
+        def payload():
+            # Generate after rate-limit waiting, using the same reference clock as the scheduler.
+            ts = str(int(getattr(self,'clock_time',time.time)()*1000))
+            fingerprint = hashlib.sha256(f"{slot['id']}|{sid}|{slot['date']}|{ts}|4pGmY6s9zX".encode()).hexdigest()
+            return {'timestamp':ts,'fingerprint':fingerprint,'date':slot['date']}
         try:
-            r = self.request('POST','/venue/user/booking/pomelo/v2/'+slot['id'],
-                             data={'timestamp':ts,'fingerprint':fingerprint,'date':slot['date']})
+            r = self.request('POST','/venue/user/booking/pomelo/v2/'+slot['id'],data_factory=payload)
             if r.status_code != 200:
                 return {'state':'unknown','reason':'http_'+str(r.status_code)}
             b = r.json()

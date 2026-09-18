@@ -36,7 +36,8 @@ def floor_number(name):
 
 def court_number(name):
     # Anchor to the court suffix so floor digits cannot be interpreted as court numbers.
-    match=re.search(r'([0-9零一二两三四五六七八九十]+)(?:号)?(?:场地|场)$',normalize(name))
+    text=re.sub(r'\((?:单打|双打)\)$','',normalize(name))
+    match=re.search(r'([0-9零一二两三四五六七八九十]+)(?:号)?(?:场地|场)$',text)
     return integer(match[1]) if match else None
 
 

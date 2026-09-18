@@ -14,7 +14,7 @@ DATE='2030-01-01'
 def row(name, sid='1', available=True):
     return dict(id=sid,date=DATE,name=name,start='19:00',end='20:00',available=available)
 def settings(quantity=1):
-    s=copy.deepcopy(daily.DEFAULT);s['windows'][0]['quantity']=quantity;return s
+    s=copy.deepcopy(daily.DEFAULT);s['windows']=s['windows'][:1];s['windows'][0]['quantity']=quantity;return s
 
 def test_default_full_fallback_and_six_first():
     names=['仙林训练馆2楼1号场','仙林体育馆1楼1号场','仙林体育馆3楼9号场','仙林体育馆3楼1号场','仙林体育馆3楼6号场']
@@ -105,8 +105,10 @@ def test_daily_scheduled_flow_uses_today_ids_before_gate(tmp_path):
         assert kw['prepared'][0]['available'] is True
         kw['before_first_submit']()
         return {'state':'complete','completed':{'daily-1':1}}
-    def wait(fire,warmup):events.append('gate');return {}
+    def wait(fire,warmup,**kwargs):events.append('gate');return {}
+    from unittest.mock import MagicMock
+    clock=MagicMock();clock.now.return_value=fire-timedelta(seconds=55);clock.age.return_value=0;clock.offset=4.7;clock.info={}
     (tmp_path/'private').mkdir()
-    with patch('daily.ROOT',tmp_path),patch('daily.load_settings',return_value=settings()),patch('daily.now_cn',return_value=fire-timedelta(seconds=55)),patch('daily.Client',Client),patch('daily.wait_until_prefetch'),patch('daily.wait_for_start',side_effect=wait),patch('daily.run',side_effect=run):
+    with patch('daily.calibrate',return_value=clock),patch('daily.ROOT',tmp_path),patch('daily.load_settings',return_value=settings()),patch('daily.now_cn',return_value=fire-timedelta(seconds=55)),patch('daily.Client',Client),patch('daily.wait_until_prefetch'),patch('daily.wait_for_start',side_effect=wait),patch('daily.run',side_effect=run):
         daily.execute(confirm=lambda _: '1')
     assert events==['types','slots','gate','close']

@@ -135,19 +135,21 @@ def existing_keys(private):
     return keys
 
 
-def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, prepared=None, before_first_submit=None):
+def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, prepared=None, before_first_submit=None, context=None):
     validate(plan)
     private=Path(private or ROOT/'private')
     private.mkdir(exist_ok=True)
     with exclusive(private):
         prior=existing_keys(private)
         plan_id=str(uuid.uuid4())
-        record={'run_id':plan_id,'created_at':now_cn().isoformat(),'plan':plan,'attempts':[], 'observations':[], 'state':'running'}
+        record={'run_id':plan_id,'created_at':now_cn().isoformat(),'plan':plan,'attempts':[], 'observations':[], 'state':'running',
+                'context':context or {'mode':'scheduled' if before_first_submit else 'immediate'}}
         path=private/('run-'+plan_id+'.json')
         atomic(path,record)
         completed={}; attempted=set(prior); counts={}; exhausted=set()
         deadline=time.monotonic()+max_seconds
         pending_gate=before_first_submit
+        prepared_batch=prepared is not None and before_first_submit is not None
         try:
             for _ in range(max_reads):
                 if time.monotonic()>=deadline:
@@ -156,7 +158,7 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, 
                 if prepared is not None:
                     found=[dict(s) for s in prepared]
                     prepared=None
-                    record['first_selection_source']='prefetched_today'
+                    record.setdefault('first_selection_source','prefetched_today')
                 else:
                     for date in dict.fromkeys(g['date'] for g in plan['targets']):
                         if time.monotonic()>=deadline:
@@ -166,7 +168,8 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, 
                 for g in plan['targets']:
                     matching=[s for s in found if s['date']==g['date'] and s['start']==g['start'] and s['end']==g['end'] and s['name'] in g['courts']]
                     observation['targets'].append({'target':g['id'],'matched':len(matching),
-                        'available':sum(s['available'] for s in matching),
+                        'available':sum(s.get('observed_available',s['available']) for s in matching),
+                        'eligible_for_attempt':sum(s['available'] for s in matching),
                         'unattempted_available':sum(s['available'] and slot_key(s) not in attempted for s in matching)})
                 record['observations'].append(observation)
                 atomic(path,record)
@@ -204,7 +207,8 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, 
                     try:
                         # The intent is already durable. No GET or fsync between this gate and POST.
                         record['schedule']=pending_gate()
-                    except BaseException:
+                    except BaseException as exc:
+                        record.update(state='not_submitted',gate_error_type=type(exc).__name__)
                         a.update(state='not_submitted',reason='interrupted_before_send')
                         atomic(path,record)
                         raise
@@ -219,10 +223,28 @@ def run(plan, client, private=None, notify=print, max_reads=20, max_seconds=60, 
                 a['estimated_payment_deadline']=a['submitted_at']+300
                 atomic(path,record)
                 if a['state']=='success':
+                    if prepared_batch:
+                        # Distinct configured time slots already have IDs. Reuse them after a
+                        # confirmed success; explicit sold-out instead forces a fresh GET.
+                        prepared=found
                     completed[group['id']]=completed.get(group['id'],0)+1
                     notify('\a预约接口返回成功：'+slot['name']+' '+slot['date']+' '+slot['start']+'–'+slot['end']+'；请立即到小程序核对并付款（五分钟为估计，以页面为准）。')
                 elif a['state'] in ('unknown','blocked'):
-                    record['state']=a['state']; notify('停止：'+a['reason']+'。已有订单保留，不自动取消或重试。'); break
+                    record['state']=a['state']
+                    if a.get('reason')=='server_rejected_unknown' and time.monotonic()<deadline:
+                        # A fresh availability snapshot is diagnosis, NOT proof that no order exists.
+                        # Keep stopped even if the rejected slot now appears unavailable.
+                        try:
+                            fresh=client.slots(slot['date'])
+                            matching=[s for s in fresh if s['date']==slot['date'] and s['start']==slot['start'] and s['end']==slot['end'] and s['name']==slot['name']]
+                            a['post_rejection_read']={'observed_at':now_cn().isoformat(),
+                                'matched_count':len(matching), 'available_count':sum(s['available'] for s in matching),
+                                'same_id_present':any(str(s['id'])==str(slot['id']) for s in matching),
+                                'meaning':'availability_only_not_order_verification'}
+                        except Exception as exc:
+                            a['post_rejection_read']={'error_type':type(exc).__name__}
+                    notify('停止：'+a['reason']+'；错误码 '+str(a.get('err_code','未知'))+'。已有订单保留，不自动取消或重试。')
+                    break
                 elif a['state']!='sold_out':
                     record['state']='unknown'; break
                 if counts[group['id']]>=plan.get('max_attempts_per_target',max(3,group['quantity'])):
