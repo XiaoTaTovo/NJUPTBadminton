@@ -19,6 +19,23 @@ class SafeError(RuntimeError):
 def now_cn():
     return datetime.now(CN)
 
+def safe_message_pattern(message):
+    """Keep only fixed business phrases, separators and clock times, never arbitrary text."""
+    text=str(message or '')
+    if any(x in text.lower() for x in ('token','cookie','password','身份证','手机号','密码')):
+        return '[敏感消息已隐藏]'
+    terms=('预约时间','预定时间','开放时间','当前时间','时间范围','不在','未到','尚未','未开始','未开放',
+           '已结束','已经','已被预定','已被预订','已被预约','预定','预约','场地','其他人','他人','有人',
+           '每天','每日','仅限','只能','请','重新','选择','刷新','重试','稍后','失败','成功','抢先','占用')
+    allowed=re.compile('|'.join(re.escape(x) for x in sorted(terms,key=len,reverse=True))+r'|(?<!\d)(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?!\d)|[，。！：、,!:;；~～—– -]')
+    out=[];end=0
+    for m in allowed.finditer(text[:500]):
+        if m.start()>end and (not out or out[-1]!='[…]'):out.append('[…]')
+        out.append(m.group());end=m.end()
+    if end<len(text):out.append('[…]')
+    return ''.join(out)[:240]
+
+
 def classify_rejection(err_code, message):
     """Map server text to a safe operational category; never persist the raw text."""
     msg = str(message or '').strip()
@@ -32,6 +49,10 @@ def classify_rejection(err_code, message):
         category = 'rate_limit'
     elif any(x in msg for x in ('验证码', '风控', '安全验证')):
         category = 'verification_required'
+    elif any(x in msg for x in ('未到预约时间','尚未到预约时间','未到开放时间','尚未开放','暂未开放','预约尚未开始')):
+        category = 'not_open_yet'
+    elif any(x in msg for x in ('不在预约时间','非预约时间','不在允许的预约时间','不在可预约时间')):
+        category = 'outside_booking_window'
     elif any(x in msg for x in ('已被预约', '已被预订', '已被预定', '已被他人', '已约满', '已满', '已被占用', '无余量', '售罄')):
         category = 'sold_out'
     elif any(x in msg for x in ('重复预约', '同一时段', '每人', '不能同时', '不允许预约')):
@@ -42,6 +63,7 @@ def classify_rejection(err_code, message):
         'category': category,
         'err_code': err_code if type(err_code) is int and abs(err_code)<1000000000 else (err_code if isinstance(err_code,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,24}',err_code) else None),
         'message_terms': [term for term in ('场地','场次','预约','预定','预订','时间','开始','结束','未开放','过期','签名','校验','失败','刷新','重试','抢先','手慢','繁忙','占用','满','频繁','锁定') if term in msg],
+        'message_pattern': safe_message_pattern(msg),
         'message_length': len(msg),
         'message_digest': hashlib.sha256(msg.encode('utf-8')).hexdigest()[:12] if msg else None,
     }

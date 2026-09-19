@@ -17,6 +17,8 @@ def slot_key(s):
 def validate(plan):
     if not isinstance(plan, dict) or plan.get('version') != 2:
         raise SafeError('配置必须为 version: 2；旧 example.yaml 不可直接提交。')
+    if plan.get('target_order','scarcity') not in ('scarcity','configured'):
+        raise SafeError('目标顺序必须为configured或scarcity。')
     groups = plan.get('targets', [])
     if not 1 <= len(groups) <= 6:
         raise SafeError('目标组数量须为 1..6。')
@@ -52,7 +54,7 @@ def validate(plan):
     return plan
 
 
-def choose(groups, found, completed, attempted, exhausted, return_only=None):
+def choose(groups, found, completed, attempted, exhausted, return_only=None, target_order="scarcity"):
     """Maximum bipartite matching of outstanding units to currently available slots.
     Preserves feasible choices for constrained groups; not a prediction of competitors.
     """
@@ -82,7 +84,11 @@ def choose(groups, found, completed, attempted, exhausted, return_only=None):
     if not owner:
         return None
     # Submit the most constrained assigned unit first; configured priority breaks ties.
-    k,u = min(owner.items(),key=lambda pair:(len(candidates[pair[1]]),pair[1][0],candidates[pair[1]].index(pair[0]),pair[1][1]))
+    def selection_rank(pair):
+        k,u=pair
+        head=(u[0],len(candidates[u])) if target_order=='configured' else (len(candidates[u]),u[0])
+        return (*head,candidates[u].index(k),u[1])
+    k,u = min(owner.items(),key=selection_rank)
     return groups[u[0]], slots[k]
 
 
@@ -143,13 +149,17 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
         prior=existing_keys(private)
         plan_id=str(uuid.uuid4())
         record={'run_id':plan_id,'created_at':now_cn().isoformat(),'plan':plan,'attempts':[], 'observations':[], 'state':'running',
-                'context':context or {'mode':'scheduled' if before_first_submit else 'immediate'}}
+                'context':context or {'mode':'scheduled' if before_first_submit else 'immediate'},'credited_slots':[]}
         path=private/('run-'+plan_id+'.json')
         atomic(path,record)
         completed={}; attempted=set(prior); counts={}; exhausted=set()
         deadline=time.monotonic()+max_seconds
         pending_gate=before_first_submit
         prepared_batch=prepared is not None and before_first_submit is not None
+        gate_released_at=None
+        boundary_retry_used=False
+        rejection_streak={}
+        rejection_refresh_used=False
         try:
             for _ in range(max_reads):
                 if all(completed.get(g['id'],0)>=g['quantity'] or g['id'] in exhausted for g in plan['targets']):
@@ -179,17 +189,18 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                 historical = [dict(s, available=s['available'] or slot_key(s) in prior) for s in found]
                 credited = set()
                 while True:
-                    credit = choose(plan['targets'], historical, completed, (attempted-prior)|credited, set(), return_only=prior)
+                    credit = choose(plan['targets'], historical, completed, (attempted-prior)|credited, set(), return_only=prior,target_order=plan.get('target_order','scarcity'))
                     if credit is None:
                         break
                     g, s = credit
                     k = slot_key(s)
                     completed[g['id']] = completed.get(g['id'], 0) + 1
+                    record['credited_slots'].append(dict(s))
                     credited.add(k)
                     prior.discard(k)
                 if all(completed.get(g['id'],0)>=g['quantity'] for g in plan['targets']):
                     record['state']='complete'; break
-                next_item=choose(plan['targets'],found,completed,attempted,exhausted)
+                next_item=choose(plan['targets'],found,completed,attempted,exhausted,target_order=plan.get('target_order','scarcity'))
                 if next_item is None and pending_gate is not None:
                     raise SafeError('提前准备未找到可提交目标；已取消定时，不在12点改为盲查。')
                 if next_item is None:
@@ -215,14 +226,20 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                         atomic(path,record)
                         raise
                     pending_gate=None
-                    deadline=time.monotonic()+max_seconds
+                    gate_released_at=time.monotonic()
+                    deadline=gate_released_at+max_seconds
                     a['submitted_at']=time.time()
+                timing_count=len(getattr(client,'timings',[]))
                 try:
                     result=client.submit(slot)
                 except Exception:
                     result={'state':'unknown','reason':'unhandled_submission_error'}
                 a.update(result)
-                a['estimated_payment_deadline']=a['submitted_at']+300
+                events=getattr(client,'timings',[])
+                if len(events)>timing_count and events[-1].get('endpoint')=='booking':
+                    a['request_timing']=dict(events[-1])
+                if a['state']=='success':
+                    a['estimated_payment_deadline']=a.get('request_timing',{}).get('local_send',a['submitted_at'])+300
                 atomic(path,record)
                 if a['state']=='success':
                     if prepared_batch:
@@ -241,7 +258,27 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                         record['state']='unknown'; break
                     if prepared_batch:
                         prepared=found
-                    notify('本候选被明确拒绝，按优先级尝试下一候选（不重复本场次）；错误码 '+str(a.get('err_code','未提供'))+'。')
+                    category=a.get('category')
+                    near_boundary=(gate_released_at is not None and time.monotonic()-gate_released_at<=3)
+                    if (a.get('definitive_rejection') is True and category in ('not_open_yet','outside_booking_window')
+                            and near_boundary and not boundary_retry_used):
+                        # One bounded exception: explicit timing rejection immediately at release
+                        # does not consume the preferred court. Client still enforces >=1s spacing.
+                        attempted.discard(slot_key(slot));boundary_retry_used=True
+                        a['action']='retry_same_slot_once_at_release_boundary'
+                        notify('服务端明确提示预约时间未到/不在窗口：在正常请求间隔后保留首选重试一次。')
+                    else:
+                        fingerprint=(a.get('err_code'),a.get('message_digest'))
+                        prev,count=rejection_streak.get(group['id'],(None,0))
+                        count=count+1 if prev==fingerprint else 1
+                        rejection_streak[group['id']]=(fingerprint,count)
+                        if (prepared_batch and not rejection_refresh_used and count>=3 and a.get('message_digest')):
+                            prepared=None;rejection_refresh_used=True
+                            a['action']='refresh_once_after_repeated_rejection'
+                            notify('连续3次相同拒绝：只读刷新一次可用性，避免继续逐个提交过期快照。')
+                        else:
+                            a['action']='next_candidate'
+                        notify('本候选明确拒绝：'+str(category or a.get('reason','未知'))+'；错误码 '+str(a.get('err_code','未提供'))+'；继续备选。')
                 else:
                     record['state']='unknown'; break
                 if counts[group['id']]>=plan.get('max_attempts_per_target',max(3,group['quantity'])):

@@ -66,7 +66,7 @@ def build_plan(settings, rows, date):
             raise SafeError('目标日期的接口没有返回足够场次标识，不能提前准备；不会用昨天的ID或12点才盲查。')
         targets.append({'id':f'daily-{i}','date':date,**w,'courts':names,'priority':settings['priority']})
         prepared.extend(matches)
-    plan={'version':2,'targets':targets,'max_orders':sum(w['quantity'] for w in settings['windows']),
+    plan={'version':2,'target_order':'configured','targets':targets,'max_orders':sum(w['quantity'] for w in settings['windows']),
           'max_attempts_per_target':30}
     return validate(plan),prepared
 
@@ -132,7 +132,14 @@ def execute(immediate=False, confirm=input):
             clock.check_gateway(c.timings[-1] if c.timings else None)
         prepared_at=clock.now() if clock else now_cn()
         plan,prepared=build_plan(settings,rows,date)
-        snapshot={'prepared_at':prepared_at.isoformat(),'date':date,'plan':plan,'slots':prepared}
+        inventory=[]
+        for w in settings['windows']:
+            raw=[s for s in rows if s['date']==date and s['start']==w['start'] and s['end']==w['end']]
+            counts=[sum(tier(s['name'])==i for s in raw) for i in range(4)]
+            inventory.append({'start':w['start'],'end':w['end'],'tier_counts':counts,
+                              'unrecognized_names':sorted({s['name'] for s in raw if tier(s['name'])==4})})
+            print(f"{w['start']}–{w['end']} 候选：3楼双打{counts[0]}、3楼单打{counts[1]}、1楼{counts[2]}、训练馆{counts[3]}（0表示本次接口未返回该档，不伪造场次）。")
+        snapshot={'prepared_at':prepared_at.isoformat(),'date':date,'plan':plan,'slots':prepared,'inventory':inventory}
         evidence='prepared-'+uuid.uuid4().hex+'.json'
         atomic(ROOT/'private'/evidence,snapshot)
         context['preparation_file']=evidence
@@ -154,7 +161,11 @@ def execute(immediate=False, confirm=input):
             gate=None
         phase='booking_engine'
         result=run(plan,c,prepared=prepared,before_first_submit=gate,context=context)
-        print('本轮结果：',result['state'],'；已满足场数：',sum(result['completed'].values()))
+        successes=[a for a in result.get('attempts',[]) if a['state']=='success']
+        credited=result.get('credited_slots',[])
+        print('本轮结果：',result['state'],'；本轮新增成功：',len(successes),'；历史记录计入：',len(credited))
+        for s in [a['slot'] for a in successes]+credited:
+            print('【预约记录】',s['start']+'–'+s['end'],s['name'],'；支付/取消/过期状态请到小程序核对。')
         return result
     except BaseException as exc:
         try:
