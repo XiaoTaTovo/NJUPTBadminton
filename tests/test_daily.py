@@ -14,7 +14,7 @@ DATE='2030-01-01'
 def row(name, sid='1', available=True):
     return dict(id=sid,date=DATE,name=name,start='19:00',end='20:00',available=available)
 def settings(quantity=1):
-    s=copy.deepcopy(daily.DEFAULT);s['windows']=s['windows'][:1];s['windows'][0]['quantity']=quantity;return s
+    s=copy.deepcopy(daily.DEFAULT);s['windows']=[{'start':'19:00','end':'20:00','quantity':quantity}];s['focus_target']='19:00-20:00';return s
 
 def test_default_full_fallback_and_six_first():
     names=['仙林训练馆2楼1号场','仙林体育馆1楼1号场','仙林体育馆3楼9号场','仙林体育馆3楼1号场','仙林体育馆3楼6号场']

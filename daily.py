@@ -12,8 +12,9 @@ from clock_sync import calibrate
 import uuid
 
 SETTINGS=ROOT/'private/daily-settings.json'
-DEFAULT={'version':1,'windows':[{'start':'19:00','end':'20:00','quantity':1},{'start':'20:00','end':'21:00','quantity':1}],
-         'priority':DEFAULT_PRIORITY,'max_attempts_per_target':30}
+DEFAULT={'version':1,'windows':[{'start':'20:00','end':'21:00','quantity':1},{'start':'21:00','end':'22:00','quantity':1}],
+         'priority':DEFAULT_PRIORITY,'max_attempts_per_target':30,
+         'focus_target':'20:00-21:00','focus_court_number':6}
 
 
 def validate_settings(settings):
@@ -31,6 +32,12 @@ def validate_settings(settings):
     if sum(w['quantity'] for w in ws)>6:
         raise SafeError('总场数最多6。')
     policy=settings['priority']
+    ws=settings.get('windows',[])
+    focus_target=settings.get('focus_target') or (f"{ws[0]['start']}-{ws[0]['end']}" if ws else '未设置')
+    settings['focus_target']=focus_target
+    settings.setdefault('focus_court_number',6)
+    if type(settings.get('focus_court_number',6)) is not int or not 1<=settings.get('focus_court_number',6)<=8:
+        raise SafeError('focus_court_number必须为1–8。')
     if sorted(policy.get('tier_order',[]))!=[0,1,2,3] or type(policy.get('preferred_3f_court')) is not int or not 1<=policy['preferred_3f_court']<=8:
         raise SafeError('优先级必须包含四档各一次，首选双打场号为1–8。')
     return settings
@@ -38,7 +45,9 @@ def validate_settings(settings):
 
 def load_settings(path=SETTINGS, legacy=None):
     if path.exists():
-        return validate_settings(json.loads(path.read_text(encoding='utf-8')))
+        settings=validate_settings(json.loads(path.read_text(encoding='utf-8')))
+        atomic(path,settings)
+        return settings
     settings=copy.deepcopy(DEFAULT)
     old=legacy or ROOT/'private/plan.json'
     if old.exists():
@@ -64,9 +73,13 @@ def build_plan(settings, rows, date):
         names=list(dict.fromkeys(s['name'] for s in matches))
         if len(names)<w['quantity']:
             raise SafeError('目标日期的接口没有返回足够场次标识，不能提前准备；不会用昨天的ID或12点才盲查。')
-        targets.append({'id':f'daily-{i}','date':date,**w,'courts':names,'priority':settings['priority']})
+        targets.append({'id':f'daily-{i}','date':date,**w,'courts':names,'priority':settings['priority'],
+                        '_focus_order':0 if f"{w['start']}-{w['end']}"==settings.get('focus_target') else 1})
         prepared.extend(matches)
-    plan={'version':2,'target_order':'configured','targets':targets,'max_orders':sum(w['quantity'] for w in settings['windows']),
+    targets.sort(key=lambda g: (g['_focus_order'], settings['windows'].index({'start':g['start'],'end':g['end'],'quantity':g['quantity']})))
+    for g in targets: g.pop('_focus_order',None)
+    plan={'version':2,'target_order':'round_robin','focus_target':settings.get('focus_target') or f"{settings['windows'][0]['start']}-{settings['windows'][0]['end']}",
+          'focus_court_number':settings.get('focus_court_number',6),'targets':targets,'max_orders':sum(w['quantity'] for w in settings['windows']),
           'max_attempts_per_target':30}
     return validate(plan),prepared
 
@@ -87,7 +100,14 @@ def wait_until_prefetch(fire, now=now_cn, monotonic=time.monotonic, sleep=time.s
 def describe(settings):
     print('每日日期：今天；开抢：北京时间12:00；地点：仙林四档自动备选。')
     policy=settings['priority']
+    ws=settings.get('windows',[])
+    focus_target=settings.get('focus_target') or (f"{ws[0]['start']}-{ws[0]['end']}" if ws else '未设置')
+    settings['focus_target']=focus_target
+    settings.setdefault('focus_court_number',6)
+    if type(settings.get('focus_court_number',6)) is not int or not 1<=settings.get('focus_court_number',6)<=8:
+        raise SafeError('focus_court_number必须为1–8。')
     labels=['新馆3楼双打(1–8)','新馆3楼单打(9–12)','体育馆1楼任意','训练馆2楼任意']
+    print('焦点目标：'+str(settings.get('focus_target') or f"{settings['windows'][0]['start']}-{settings['windows'][0]['end']}")+'，新馆3楼'+str(settings.get('focus_court_number',6))+'号；')
     print('默认首选：新馆3楼'+str(policy['preferred_3f_court'])+'号；顺序：'+' > '.join(labels[i] for i in policy['tier_order']))
     for w in settings['windows']:
         print(f"每天 {w['start']}–{w['end']}，需要 {w['quantity']} 场")

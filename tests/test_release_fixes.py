@@ -122,10 +122,10 @@ def test_request_calls_payload_factory_after_wait(tmp_path):
 
 
 def test_default_two_distinct_hours():
-    assert daily.DEFAULT['windows']==[dict(start='19:00',end='20:00',quantity=1),dict(start='20:00',end='21:00',quantity=1)]
+    assert daily.DEFAULT['windows']==[dict(start='20:00',end='21:00',quantity=1),dict(start='21:00',end='22:00',quantity=1)]
 
 def test_two_scheduled_hours_submit_without_intermediate_get(tmp_path):
-    rows=[dict(id=str(i),name='仙林体育馆3F羽毛球馆6号场地',date='2030-01-01',start=start,end=end,available=True) for i,(start,end) in enumerate([('19:00','20:00'),('20:00','21:00')])]
+    rows=[dict(id=str(i),name='仙林体育馆3F羽毛球馆6号场地',date='2030-01-01',start=start,end=end,available=True) for i,(start,end) in enumerate([('20:00','21:00'),('21:00','22:00')])]
     plan,_=daily.build_plan(daily.DEFAULT,rows,'2030-01-01')
     c=MagicMock();c.timings=[];c.submit.return_value=dict(state='success')
     c.slots.side_effect=AssertionError('unexpected GET between prepared targets')
@@ -133,7 +133,7 @@ def test_two_scheduled_hours_submit_without_intermediate_get(tmp_path):
     assert result['state']=='complete'
     assert c.submit.call_count==2
     c.slots.assert_not_called()
-    assert [call.args[0]['start'] for call in c.submit.call_args_list]==['19:00','20:00']
+    assert [call.args[0]['start'] for call in c.submit.call_args_list]==['20:00','21:00']
 
 
 def test_scheduled_explicit_soldout_uses_next_prepared_candidate(tmp_path):
@@ -184,7 +184,7 @@ def test_fallback_does_not_ignore_account_or_ambiguous_results(body,expected):
 
 def test_failed_candidates_do_not_prevent_second_window(tmp_path):
     rows=[]
-    for i,(start,end) in enumerate([('19:00','20:00'),('20:00','21:00')]):
+    for i,(start,end) in enumerate([('20:00','21:00'),('21:00','22:00')]):
         for n in [6,1]:
             rows.append(dict(id=f'{i}-{n}',name=f'仙林体育馆3F羽毛球馆{n}号场地',date='2030-01-01',start=start,end=end,available=True))
     plan,_=daily.build_plan(daily.DEFAULT,rows,'2030-01-01')

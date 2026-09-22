@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from api import ROOT, SafeError, now_cn
-from preferences import tier, rank
+from preferences import tier, rank, court_number
 
 
 def slot_key(s):
@@ -17,8 +17,8 @@ def slot_key(s):
 def validate(plan):
     if not isinstance(plan, dict) or plan.get('version') != 2:
         raise SafeError('配置必须为 version: 2；旧 example.yaml 不可直接提交。')
-    if plan.get('target_order','scarcity') not in ('scarcity','configured'):
-        raise SafeError('目标顺序必须为configured或scarcity。')
+    if plan.get('target_order','scarcity') not in ('scarcity','configured','round_robin'):
+        raise SafeError('目标顺序必须为configured、round_robin或scarcity。')
     groups = plan.get('targets', [])
     if not 1 <= len(groups) <= 6:
         raise SafeError('目标组数量须为 1..6。')
@@ -86,8 +86,16 @@ def choose(groups, found, completed, attempted, exhausted, return_only=None, tar
     # Submit the most constrained assigned unit first; configured priority breaks ties.
     def selection_rank(pair):
         k,u=pair
-        head=(u[0],len(candidates[u])) if target_order=='configured' else (len(candidates[u]),u[0])
-        return (*head,candidates[u].index(k),u[1])
+        candidate_index=groups[u[0]]['courts'].index(slots[k]['name'])
+        if target_order=='configured':
+            head=(u[0],len(candidates[u]))
+        elif target_order=='round_robin':
+            # Candidate rank is the round; tie-break by focus/group order.
+            focus_index=groups[u[0]].get('_focus_order',u[0])
+            head=(candidate_index,focus_index)
+        else:
+            head=(len(candidates[u]),u[0])
+        return (*head,candidate_index,u[1])
     k,u = min(owner.items(),key=selection_rank)
     return groups[u[0]], slots[k]
 
@@ -211,7 +219,16 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                     break
                 if len([x for x in record['attempts'] if x['state']=='success'])>=plan['max_orders']:
                     break
-                a={'target':group['id'],'slot':slot,'state':'submitting','submitted_at':time.time()}
+                candidate_index=group['courts'].index(slot['name'])
+                focus_target=plan.get('focus_target')
+                focus_court=plan.get('focus_court_number')
+                is_focus=(focus_target==f"{group['start']}-{group['end']}" and
+                           (focus_court is None or court_number(slot['name'])==focus_court))
+                slot_log=dict(slot, tier=tier(slot['name']), court_number=court_number(slot['name']),
+                              candidate_index=candidate_index, is_focus_target=is_focus)
+                a={'target':group['id'],'slot':slot_log,'state':'submitting','submitted_at':time.time(),
+                   'candidate_index':candidate_index,'candidate_tier':tier(slot['name']),
+                   'is_focus_target':is_focus}
                 record['attempts'].append(a); atomic(path,record)  # durable intent before POST
                 counts[group['id']]=counts.get(group['id'],0)+1
                 attempted.add(slot_key(slot))

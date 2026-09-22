@@ -3,7 +3,7 @@ from unittest.mock import MagicMock,patch
 import json
 import pytest
 from api import classify_rejection,safe_message_pattern
-from booking import choose,run
+from booking import choose,run,slot_key
 from daily import build_plan,DEFAULT
 
 
@@ -46,7 +46,7 @@ def test_release_boundary_retries_preferred_once_only(tmp_path):
     c.submit.side_effect=[failure,failure,dict(state='success'),dict(state='success')]
     result=run(p,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
     ids=[call.args[0]['id'] for call in c.submit.call_args_list]
-    assert ids==['20:00-6','20:00-6','20:00-1','21:00-6']
+    assert ids==['20:00-6','20:00-6','21:00-6','20:00-1']
     assert result['state']=='complete'
     c.slots.assert_not_called()
 
@@ -58,8 +58,8 @@ def test_repeated_rejection_refresh_skips_stale_candidates(tmp_path):
     c.slots.return_value=[dict(s,available=(s['id']=='20:00-3' or s['start']=='21:00')) for s in rows]
     result=run(p,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
     assert result['state']=='complete'
-    c.slots.assert_called_once()
-    assert result['attempts'][2]['action']=='refresh_once_after_repeated_rejection'
+    c.slots.assert_not_called()
+    assert result['attempts'][2]['action']=='next_candidate'
 
 
 def test_request_timing_and_history_credit_are_explicit(tmp_path):
@@ -74,3 +74,38 @@ def test_request_timing_and_history_credit_are_explicit(tmp_path):
     second=run(p,c,tmp_path,lambda _:None,prepared=rows)
     assert not second['attempts']
     assert len(second['credited_slots'])==2
+
+
+def test_round_robin_prefers_focus_then_alternates_targets():
+    rows=make_rows(4,4);p=plan(rows)
+    attempted=set();completed={};exhausted=set();chosen=[]
+    for _ in range(4):
+        g,slot=choose(p['targets'],rows,completed,attempted,exhausted,target_order='round_robin')
+        chosen.append((g['start'],slot['name']))
+        attempted.add(slot_key(slot))
+    assert [x[0] for x in chosen]==['20:00','21:00','20:00','21:00']
+    assert chosen[0][1].endswith('6号场地') and chosen[1][1].endswith('6号场地')
+
+
+def test_round_robin_stops_completed_target_and_focus_metadata(tmp_path):
+    rows=make_rows(4,4);p=plan(rows);c=MagicMock();c.timings=[]
+    c.submit.side_effect=[dict(state='success'),dict(state='success')]
+    result=run(p,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
+    assert result['state']=='complete'
+    assert [a['slot']['start'] for a in result['attempts']]==['20:00','21:00']
+    assert result['attempts'][0]['is_focus_target'] is True
+    assert result['attempts'][1]['is_focus_target'] is False
+
+
+def test_repeated_rejection_refreshes_single_target_once(tmp_path):
+    rows=[dict(id=str(i),name=f'仙林体育馆3F羽毛球馆{n}号场地',date='2030-01-01',start='20:00',end='21:00',available=True) for i,n in enumerate([6,1,2,3])]
+    settings={'windows':[dict(start='20:00',end='21:00',quantity=1)],'priority':DEFAULT['priority'],'focus_target':'20:00-21:00'}
+    p=build_plan(settings,rows,'2030-01-01')[0]
+    c=MagicMock();c.timings=[]
+    failure=dict(state='rejected',definitive_rejection=True,category='server_rejected_unknown',err_code=7070,message_digest='same')
+    c.submit.side_effect=[failure,failure,failure,dict(state='success')]
+    c.slots.return_value=[dict(s,available=(s['id']=='3')) for s in rows]
+    result=run(p,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
+    assert result['state']=='complete'
+    c.slots.assert_called_once()
+    assert result['attempts'][2]['action']=='refresh_once_after_repeated_rejection'
