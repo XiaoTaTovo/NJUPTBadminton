@@ -3,7 +3,7 @@ import time
 from api import now_cn, SafeError
 
 
-def wait_for_start(fire, warmup, now=now_cn, monotonic=time.monotonic, sleep=time.sleep):
+def wait_for_start(fire, warmup, now=now_cn, monotonic=time.monotonic, sleep=time.sleep, tick=None, spin_ms=0, defer_format=False):
     remaining=(fire-now()).total_seconds()
     if remaining<=0:
         raise SafeError('确认时启动时间已过，拒绝补跑。')
@@ -18,11 +18,17 @@ def wait_for_start(fire, warmup, now=now_cn, monotonic=time.monotonic, sleep=tim
         warmup()  # Same session; exceptions stop rather than blindly booking with bad auth.
         info['warmup']='completed'
         info['warmup_completed_at']=now().isoformat()
-    while deadline>monotonic():
-        sleep(min(.2,deadline-monotonic()))
+    # Bounded final spin only with the real monotonic clock; injected clocks never busy-loop.
+    spin=min(max(float(spin_ms),0),1.0)/1000 if monotonic is time.monotonic else 0
+    while (left:=deadline-monotonic())>spin:
+        sleep(min(.2,max(0,left-spin)))
+        if tick is not None: tick()
+    while monotonic()<deadline: pass
+    fired_ns=time.perf_counter_ns()
     fired=now()
     drift=(fired-fire).total_seconds()
     if drift<0 or drift>3:
         raise SafeError('时钟变化或休眠导致错过窗口，拒绝提前提交或补跑。')
-    info.update(fired_at=fired.isoformat(),trigger_lateness_ms=round(drift*1000,3))
+    info.update(fired_perf_ns=fired_ns,fired_epoch=fired.timestamp(),trigger_lateness_ms=round(drift*1000,3))
+    if not defer_format: info['fired_at']=fired.isoformat()
     return info

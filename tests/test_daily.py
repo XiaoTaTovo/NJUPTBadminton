@@ -25,7 +25,7 @@ def test_default_full_fallback_and_six_first():
     assert selected['name']==names[-1]
 
 def test_custom_priority_and_unknown_excluded():
-    s=settings();s['priority']['tier_order']=[3,2,1,0]
+    s=settings();s['priority']['tier_order']=[3,2,1,0];s['focus_court_number']=8
     rows=[row('仙林体育馆3楼6号场'),row('仙林训练馆2楼1号场','2'),row('三牌楼1号场','3')]
     p,prepared=daily.build_plan(s,rows,DATE)
     assert len(prepared)==2
@@ -94,6 +94,7 @@ def test_daily_scheduled_flow_uses_today_ids_before_gate(tmp_path):
     rows=[row('仙林体育馆3楼6号场',available=False)]
     events=[]
     class Client:
+        def __init__(self, **kwargs): pass
         claims={'exp':fire.timestamp()+3600}
         timings=[]
         def types(self):events.append('types')
@@ -107,8 +108,8 @@ def test_daily_scheduled_flow_uses_today_ids_before_gate(tmp_path):
         return {'state':'complete','completed':{'daily-1':1}}
     def wait(fire,warmup,**kwargs):events.append('gate');return {}
     from unittest.mock import MagicMock
-    clock=MagicMock();clock.now.return_value=fire-timedelta(seconds=55);clock.age.return_value=0;clock.offset=4.7;clock.info={}
+    clock=MagicMock();clock.now.return_value=fire-timedelta(seconds=100);clock.age.return_value=0;clock.offset=4.7;clock.info={}
     (tmp_path/'private').mkdir()
-    with patch('daily.calibrate',return_value=clock),patch('daily.ROOT',tmp_path),patch('daily.load_settings',return_value=settings()),patch('daily.now_cn',return_value=fire-timedelta(seconds=55)),patch('daily.Client',Client),patch('daily.wait_until_prefetch'),patch('daily.wait_for_start',side_effect=wait),patch('daily.run',side_effect=run):
+    with patch('daily.calibrate',return_value=clock),patch('daily.ROOT',tmp_path),patch('daily.load_settings',return_value=settings()),patch('daily.now_cn',return_value=fire-timedelta(seconds=100)),patch('daily.Client',Client),patch('daily.wait_until'),patch('daily.WakeLease'),patch('daily.wait_for_start',side_effect=wait),patch('daily.run',side_effect=run):
         daily.execute(confirm=lambda _: '1')
     assert events==['slots','gate','close']

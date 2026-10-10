@@ -53,7 +53,7 @@ def wizard():
             raise SafeError('所选日期未返回该场馆场次，不能凭空创建场次。')
         times=sorted({(s['start'],s['end']) for s in filtered})
         print(GROUP_HELP)
-        count=number('目标组数量（1–6；每个时段一组，回车默认1组）：',1,6,1)
+        count=number('目标组数量（1–2，总场数最多2；每时段一组）：',1,2,1)
         groups=[]
         for i in range(count):
             print(f'【第 {i+1}/{count} 组】请选择这一个组的时间段；填完场地和数量才进入下一组。')
@@ -79,7 +79,7 @@ def wizard():
                     break
                 except ValueError:
                     print('请输入不重复且有效的场地序号。')
-            remaining=6-sum(g['quantity'] for g in groups)-(count-i-1)
+            remaining=2-sum(g['quantity'] for g in groups)-(count-i-1)
             upper=min(remaining,len(indices))
             quantity=number(f'第{i+1}组需要几场（1=任一候选成功；2=需要两场；本组可填1–{upper}，回车默认1）：',1,upper,1)
             groups.append({'id':f'target-{i+1}','date':date,'start':start,'end':end,'quantity':quantity,
@@ -181,9 +181,10 @@ def advanced_main():
     import local_session
     local_session.protect_dir()
     menu={'1':lambda:local_session.capture(300),'2':local_session.verify,'3':wizard,
-          '4':lambda:execute(False),'5':lambda:execute(True),'6':benchmark,'7':results,'8':local_session.restore,'9':observe,'10':show_help}
+          '4':lambda:execute(False),'5':lambda:execute(True),'6':benchmark,'7':results,'8':local_session.restore,'9':observe,'10':show_help,'11':lambda: __import__('task_runtime').diagnose()}
     while True:
         print(MENU)
+        print("11（只读：当前任务／最近失败诊断）")
         option=input('请选择：').strip()
         if option=='0':
             return
@@ -191,7 +192,7 @@ def advanced_main():
             if option in menu:
                 menu[option]()
             else:
-                print('请输入菜单数字0–10；输入10可查看完整帮助。')
+                print('请输入菜单数字0–11；输入10可查看完整帮助。')
         except KeyboardInterrupt:
             print('已中止；若有请求在途，请先到小程序核对订单，不要重复提交。')
         except SafeError as e:
@@ -199,28 +200,39 @@ def advanced_main():
         except Exception as e:
             print('操作失败：'+type(e).__name__+'；不输出凭据或原始响应。')
 
-def main():
+def _main_menu():
     import daily
     import local_session
     local_session.protect_dir()
     menu={'1':daily.execute,'2':lambda:daily.execute(immediate=True),
           '3':daily.change_windows,'4':daily.change_priority,
           '5':lambda:local_session.capture(300),'6':local_session.verify,
-          '7':results,'8':advanced_main,'9':show_help}
+          '7':results,'8':advanced_main,'9':show_help,'11':lambda: __import__('task_runtime').diagnose()}
     while True:
         try:
-            print('\n【每日快捷预约】')
+            from task_runtime import show_last_status, set_title
+            set_title('预约助手：菜单（非定时等待）')
+            show_last_status(PRIVATE)
+            print('\n【每日快捷预约：当前在菜单，不代表预约已启动】')
             daily.describe(daily.load_settings())
-            print('1（今天12点预约，默认） 2（今天立即预约）\n3（修改每日时段/场数） 4（可选：修改优先级）\n5（获取/刷新凭据） 6（只读验证登录）\n7（查看结果） 8（高级工具，0返回） 9（字段帮助） 0（退出）')
+            print('1（今天12点预约，默认） 2（今天立即预约）\n3（修改每日时段/场数） 4（可选：修改优先级）\n5（获取/刷新凭据） 6（只读验证登录）\n7（查看结果） 8（高级工具，0返回） 9（字段帮助） 11（只读诊断） 0（退出）')
             option=input('输入数字（回车选1；提交前仍需确认）：').strip() or '1'
             if option=='0': return
             if option in menu: menu[option]()
-            else: print('请输入0–9。')
+            else: print('请输入0–9或11。')
         except (KeyboardInterrupt, EOFError):
             print('已退出等待；若曾提交，请到小程序核对，勿盲目重试。')
             return
         except SafeError as e: print(str(e))
         except Exception as e: print('操作失败：'+type(e).__name__+'；未输出凭据或原始响应。')
+
+def main():
+    import local_session
+    from task_runtime import task_lock
+    local_session.protect_dir()
+    with task_lock(PRIVATE, 'menu.lock'):
+        return _main_menu()
+
 
 if __name__=='__main__':
     try:

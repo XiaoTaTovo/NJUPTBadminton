@@ -46,7 +46,7 @@ def test_release_boundary_retries_preferred_once_only(tmp_path):
     c.submit.side_effect=[failure,failure,dict(state='success'),dict(state='success')]
     result=run(p,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
     ids=[call.args[0]['id'] for call in c.submit.call_args_list]
-    assert ids==['20:00-6','20:00-6','21:00-6','20:00-1']
+    assert ids==['20:00-6','21:00-6','20:00-1','21:00-1']
     assert result['state']=='complete'
     c.slots.assert_not_called()
 
@@ -102,10 +102,10 @@ def test_repeated_rejection_refreshes_single_target_once(tmp_path):
     settings={'windows':[dict(start='20:00',end='21:00',quantity=1)],'priority':DEFAULT['priority'],'focus_target':'20:00-21:00'}
     p=build_plan(settings,rows,'2030-01-01')[0]
     c=MagicMock();c.timings=[]
-    failure=dict(state='rejected',definitive_rejection=True,category='server_rejected_unknown',err_code=7070,message_digest='same')
+    failure=dict(state='sold_out',definitive_rejection=True,category='sold_out',err_code=7070,message_digest='same')
     c.submit.side_effect=[failure,failure,failure,dict(state='success')]
     c.slots.return_value=[dict(s,available=(s['id']=='3')) for s in rows]
     result=run(p,c,tmp_path,lambda _:None,prepared=rows,before_first_submit=lambda:{})
     assert result['state']=='complete'
     c.slots.assert_called_once()
-    assert result['attempts'][2]['action']=='refresh_once_after_repeated_rejection'
+    assert result['attempts'][2]['action']=='refresh_once_after_inventory_rejections'

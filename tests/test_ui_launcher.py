@@ -34,7 +34,7 @@ class UIAndLauncherTests(unittest.TestCase):
         self.assertIsNone(launcher.owned_kind(['clash.exe'],str(root),root))
         self.assertIsNone(launcher.owned_kind(['mitmdump.exe','--listen-port','8080'],str(root),root))
         self.assertEqual(launcher.owned_kind(['mitmdump.exe','-s',str(root/'local_capture_addon.py')],str(root),root),'capture')
-    def test_real_two_launches_only_replace_test_app(self):
+    def test_real_two_launches_preserve_existing_app(self):
         # Actual OS processes, isolated temporary project; no network, booking, or registry access.
         import psutil
         processes=[]
@@ -55,12 +55,13 @@ class UIAndLauncherTests(unittest.TestCase):
                 first=subprocess.Popen([sys.executable,str(root/'launcher.py')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
                 processes.append(first);pid1=wait_pid();child1=psutil.Process(pid1)
                 second=subprocess.Popen([sys.executable,str(root/'launcher.py')],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-                processes.append(second);pid2=wait_pid(pid1);child2=psutil.Process(pid2)
-                self.assertFalse(child1.is_running())
-                self.assertTrue(child2.is_running())
-                self.assertEqual(first.wait(timeout=5),0)
-                child2.terminate();child2.wait(timeout=5)
+                processes.append(second)
                 self.assertEqual(second.wait(timeout=5),0)
+                self.assertEqual(int((root/'pid').read_text()),pid1)
+                self.assertTrue(child1.is_running())
+                self.assertIsNone(first.poll())
+                child1.terminate();child1.wait(timeout=5)
+                self.assertEqual(first.wait(timeout=5),0)
             finally:
                 for proc in processes:
                     if proc.poll() is None:

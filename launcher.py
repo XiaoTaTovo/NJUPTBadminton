@@ -1,4 +1,4 @@
-"""Replace only this project's assistant processes; leave unrelated Python/Clash alone."""
+"""Single-instance launcher. Never replace a running menu or booking task."""
 import os
 import subprocess
 import sys
@@ -98,29 +98,41 @@ def startup_lock():
             f.seek(0);msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1)
 
 
+def logical_processes(found):
+    """The venv redirector and actual Python interpreter form one logical instance."""
+    ids={p.pid for p,_,_ in found}
+    return [(p,k,t) for p,k,t in found if p.ppid() not in ids]
+
+
 def main():
     from local_session import BACKUP, restore
     (ROOT/'private').mkdir(exist_ok=True)
     with startup_lock():
-        print('正在检查本项目旧进程…',flush=True)
-        count=stop_owned()
-        if count:
-            print(f'已关闭本项目旧进程 {count} 个。若曾提交订单，请先核对；未知状态不会清空。',flush=True)
-        if BACKUP.exists():
-            restore()
-        print('正在打开菜单…',flush=True)
+        print('正在检查本项目现有窗口…',flush=True)
+        existing=logical_processes(owned_processes())
+        if existing:
+            print('已有预约助手或抓包任务运行，请使用已有窗口。本次不会关闭、替换或重启旧任务。',flush=True)
+            return 0
+        if BACKUP.exists(): restore()
+        print('正在打开菜单（尚未启动定时预约）…',flush=True)
         proc=subprocess.Popen([sys.executable,str(ROOT/'app.py')],cwd=ROOT)
     code=proc.wait()
-    # Replacement on Windows terminates the app: exit old launcher without leaving a pause prompt.
     return 0 if code in (0,1,15) else code
 
 
-if __name__=='__main__':
-    try:
-        sys.exit(main())
+def entry():
+    try: return main()
     except KeyboardInterrupt:
-        print('启动已由用户中止；再次双击即可重开。')
-        sys.exit(0)
-    except Exception as e:
-        print('启动失败：'+(str(e) if isinstance(e,RuntimeError) else type(e).__name__))
-        sys.exit(2)
+        print('启动器收到中断；请查看任务窗口或只读诊断确认状态。')
+        return 0
+    except Exception as exc:
+        print('启动失败：'+('请检查单实例锁或旧任务状态。' if isinstance(exc,RuntimeError) else type(exc).__name__))
+        return 2
+
+
+if __name__=='__main__':
+    code=entry()
+    if '--window' in sys.argv:
+        try: input('窗口任务已结束。按回车关闭；再次启动不会自动预约：')
+        except (KeyboardInterrupt,EOFError): pass
+    sys.exit(code)

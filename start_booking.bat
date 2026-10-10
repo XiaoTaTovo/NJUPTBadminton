@@ -7,5 +7,5 @@ if not exist "%~dp0.venv\Scripts\python.exe" (
   pause
   exit /b 2
 )
-"%~dp0.venv\Scripts\python.exe" -u "%~dp0launcher.py"
-if errorlevel 2 pause
+start "NJUPT Booking" "%~dp0.venv\Scripts\python.exe" -u "%~dp0launcher.py" --window
+exit /b 0

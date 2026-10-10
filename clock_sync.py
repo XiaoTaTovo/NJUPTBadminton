@@ -30,17 +30,17 @@ class ReferenceClock:
     def check_gateway(self, event):
         """Date corroboration only, not the authority for sub-second correction."""
         if not event or not event.get('http_date'):
-            raise SafeError('缺少HTTP Date旁证，停止定时；没有改系统时间。')
+            raise SafeError(code='GATEWAY_TIME_CONFLICT')
         try:
             server=parsedate_to_datetime(event['http_date']).timestamp()
             corrected_send=event.get('corrected_send',event['local_send']+self.offset)
             rtt=event['rtt_ms']/1000
         except (TypeError,ValueError,KeyError):
-            raise SafeError('时间旁证无法解析，停止定时。') from None
+            raise SafeError(code='GATEWAY_TIME_CONFLICT') from None
         # Date is whole seconds and may originate at a gateway. Permit quantization/network,
         # but stop on a material disagreement instead of silently using a conflicting clock.
         if server > corrected_send+rtt+1 or server+1 < corrected_send-1:
-            raise SafeError('NTP参考时间与网关Date明显不一致，停止定时，请检查时间源。')
+            raise SafeError(code='GATEWAY_TIME_CONFLICT')
         self.info['gateway_corroborated']=True
 
 
@@ -49,22 +49,65 @@ def parse_offsets(text):
     return [float(x.replace(',','.')) for x in re.findall(r',\s*([+-]\d+[.,]\d+)s\s*$',text,re.M)]
 
 
-def calibrate():
-    samples=[];sources=[]
+def calibrate(*, deadline=None, observer=None, round_number=1, runner=None, monotonic=None):
+    """Bounded read-only sampling; deadline is an absolute monotonic deadline."""
+    runner=runner or subprocess.run
+    mono=monotonic or time.monotonic
+    emit=observer or (lambda *args, **kwargs: None)
+    last=SafeError(code='CLOCK_SAMPLES_INSUFFICIENT')
     for host in ('time.windows.com','time.cloudflare.com'):
+        remaining=10 if deadline is None else min(10,deadline-mono())
+        if remaining<=0: break
+        started=mono()
+        details={'source':host,'round':round_number,'remaining_seconds':remaining}
+        emit('clock_sample_started',details)
+        values=[]
         try:
-            result=subprocess.run(['w32tm','/stripchart','/computer:'+host,'/dataonly','/samples:3','/period:1'],
-                capture_output=True,text=True,errors='replace',timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW)
+            result=runner(['w32tm','/stripchart','/computer:'+host,'/dataonly','/samples:3','/period:1'],
+                capture_output=True,text=True,errors='replace',timeout=remaining,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             values=parse_offsets(result.stdout)
-        except (OSError,subprocess.TimeoutExpired):
-            values=[]
-        if len(values)>=2:
-            samples.extend(values);sources.append(host)
-            break  # bounded fallback only; no continuous NTP polling
-    if len(samples)<2:
-        raise SafeError('无法取得至少2个只读校时样本，已停止定时；检查UDP123连接。不会悄悄按未校准本机时间抢场。')
-    offset=statistics.median(samples)
-    if abs(offset)>60 or max(samples)-min(samples)>.25:
-        raise SafeError('校时偏差过大或样本抖动超过250ms，停止定时，请先人工检查系统时钟。')
-    return ReferenceClock(offset,samples,sources)
+            if type(result.returncode) is int: details['return_code']=result.returncode
+            if deadline is not None and mono()>=deadline:
+                raise SafeError(code='CLOCK_COMMAND_TIMEOUT')
+            if len(values)<2: raise SafeError(code='CLOCK_SAMPLES_INSUFFICIENT')
+            offset=statistics.median(values)
+            spread=max(values)-min(values)
+            details.update(sample_count=len(values),offset_seconds=offset,spread_seconds=spread)
+            if abs(offset)>60: raise SafeError(code='CLOCK_OFFSET_OUT_OF_RANGE')
+            if spread>.25: raise SafeError(code='CLOCK_SAMPLE_SPREAD_HIGH')
+        except subprocess.TimeoutExpired:
+            last=SafeError(code='CLOCK_COMMAND_TIMEOUT')
+        except OSError:
+            last=SafeError(code='CLOCK_SAMPLES_INSUFFICIENT')
+        except SafeError as exc:
+            last=exc
+        else:
+            details['elapsed_ms']=(mono()-started)*1000
+            emit('clock_sample_completed',details)
+            return ReferenceClock(offset,values,[host])
+        details.update(sample_count=len(values),elapsed_ms=(mono()-started)*1000,last_error_code=last.code)
+        emit('clock_sample_failed',details)
+    raise last
+
+
+def refresh_clock(deadline, *, observer=None, calibrator=None, monotonic=None, sleep=None):
+    mono=monotonic or time.monotonic
+    sleep=sleep or time.sleep
+    calibrator=calibrator or calibrate
+    emit=observer or (lambda *args, **kwargs: None)
+    last='CLOCK_SAMPLES_INSUFFICIENT'
+    for round_number in range(1,4):
+        if mono()>=deadline: break
+        try:
+            clock=calibrator(deadline=deadline,observer=emit,round_number=round_number)
+            if mono()>=deadline: raise SafeError(code='CLOCK_COMMAND_TIMEOUT')
+            return clock
+        except SafeError as exc:
+            last=exc.code
+        if round_number<3 and deadline-mono()>5:
+            emit('clock_retry_wait',{'round':round_number,'retry_in_seconds':5,
+                                    'remaining_seconds':deadline-mono(),'last_error_code':last})
+            sleep(5)
+        else: break
+    raise SafeError(code='CLOCK_REFRESH_EXHAUSTED',details={'last_error_code':last,'round':round_number})

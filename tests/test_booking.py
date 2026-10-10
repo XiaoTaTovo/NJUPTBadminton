@@ -47,13 +47,13 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(SafeError): validate(p)
         p=plan();p['targets'][0]['courts']=['A','A']
         with self.assertRaises(SafeError):validate(p)
-    def test_same_and_different_time_three_orders(self):
-        p=plan([group(quantity=2),group('later',['C'],1,'19:00')])
+    def test_hard_two_order_cap(self):
+        p=plan([group(),group('later',['C'],1,'19:00')])
         f=Fake([slot(),slot('B',sid='2'),slot('C','19:00','3')])
         with tempfile.TemporaryDirectory() as td:
             r=run(p,f,td,lambda _:None,max_reads=5)
-            self.assertEqual(r['state'],'complete');self.assertEqual(len(f.calls),3)
-            self.assertEqual(len(set(slot_key(x) for x in f.calls)),3)
+            self.assertEqual(r['state'],'complete');self.assertEqual(len(f.calls),2)
+            self.assertEqual(len(set(slot_key(x) for x in f.calls)),2)
     def test_unknown_stops_and_blocks_restart(self):
         f=Fake([slot(),slot('B',sid='2')],[{'state':'unknown','reason':'timeout'}])
         with tempfile.TemporaryDirectory() as td:
