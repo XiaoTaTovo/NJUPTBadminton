@@ -6,7 +6,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs
 import pytest, requests
 from requests.adapters import BaseAdapter
-import api, booking, daily
+import api, booking, daily, durable_attempts
 from api import SafeError, classify_rejection
 
 DATE='2099-01-01'
@@ -127,11 +127,11 @@ def test_hard_cap_rejects_config_and_two_previous_reservations(tmp_path):
 
 
 def test_intent_failure_no_post(tmp_path):
-    rr=rows();c=Fake(rr,[dict(state='success')]);real=booking.atomic
+    rr=rows();c=Fake(rr,[dict(state='success')]);real=durable_attempts.write_record
     def atomic(path,obj):
-        if any(a['state']=='submitting' for a in obj.get('attempts',[])):raise OSError('synthetic failure')
+        if obj.get('state')=='submitting':raise OSError('synthetic failure')
         return real(path,obj)
-    with patch('booking.atomic',side_effect=atomic),pytest.raises(OSError):booking.run(plan(rr),c,tmp_path,lambda _:None,prepared=rr)
+    with patch('durable_attempts.write_record',side_effect=atomic),pytest.raises(SafeError):booking.run(plan(rr),c,tmp_path,lambda _:None,prepared=rr)
     assert not c.calls
 
 
@@ -204,11 +204,11 @@ def test_adapter_connection_reuse_observation_without_identifiers():
 
 
 def test_after_send_durable_failure_stops_and_preserves_unknown_intent(tmp_path):
-    rr=rows();c=Fake(rr,[dict(state='success')]);real=booking.atomic
+    rr=rows();c=Fake(rr,[dict(state='success')]);real=durable_attempts.write_record
     def save(path,obj):
-        if any(a['state']=='success' for a in obj.get('attempts',[])):raise OSError('disk failure after response')
+        if obj.get('state')=='success':raise OSError('disk failure after response')
         return real(path,obj)
-    with patch('booking.atomic',side_effect=save),pytest.raises(OSError):booking.run(plan(rr),c,tmp_path,lambda _:None,prepared=rr)
+    with patch('durable_attempts.write_record',side_effect=save),pytest.raises(SafeError):booking.run(plan(rr),c,tmp_path,lambda _:None,prepared=rr)
     assert len(c.calls)==1
     with pytest.raises(SafeError):booking.existing_keys(tmp_path)
 

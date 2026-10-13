@@ -11,6 +11,7 @@ from pathlib import Path
 import psutil
 from api import ROOT, CN, now_cn, SafeError
 from booking import atomic
+from durable_attempts import recover
 from safe_errors import MESSAGES, safe_details
 
 PHASES={'credentials','initial_calibration','refresh_wait','refresh_calibration','prefetch_wait',
@@ -202,14 +203,25 @@ def diagnose(private=None, root=ROOT):
     except OSError: incomplete=True
     print('记录到的场次GET：',counts['slots'],'；类型GET：',counts['types'],'；预约POST：',counts['booking'])
     successes=credited=unknown=0
+    try:
+        minimal=[a for a in recover(private).values() if a.get('task_id')==state['task_id']]
+    except SafeError:
+        minimal=[];incomplete=True
+        print('最小恢复记录异常；请人工核对订单，禁止自动重跑。')
+    successes+=sum(a['state']=='success' for a in minimal)
+    unknown+=sum(a['state'] in ('unknown','submitting') for a in minimal)
+    if minimal:
+        print('最小持久化记录：',len(minimal),'；提交期间详细请求日志可能尚未汇总，提交意图不证明已发送。')
     for path in private.glob('run-*.json'):
         run=read_json(path)
         if not run:
             incomplete=True; continue
         if run.get('context',{}).get('task_id')!=state['task_id']: continue
-        successes+=sum(a.get('state')=='success' for a in run.get('attempts',[]))
+        if run.get('log_version',0)<4:
+            successes+=sum(a.get('state')=='success' for a in run.get('attempts',[]))
+            unknown+=sum(a.get('state') in ('unknown','submitting') for a in run.get('attempts',[]))
+        incomplete=incomplete or run.get('telemetry_incomplete',False)
         credited+=len(run.get('credited_slots',[]))
-        unknown+=sum(a.get('state') in ('unknown','submitting') for a in run.get('attempts',[]))
     print('本轮新增成功：',successes,'；历史计入：',credited,'；未知/未完成意图：',unknown)
     if unknown: print('存在未确认订单意图；不应重新提交，请先人工核对。')
     if not counts['booking']: print('没有记录到预约请求；日志缺失或进程异常时，不证明服务器绝对未收到。')

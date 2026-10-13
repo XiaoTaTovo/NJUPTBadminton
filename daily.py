@@ -248,16 +248,19 @@ def _execute_task(settings,fire,immediate,confirm,private):
             journal.transition('booking_engine'); gate=None
         def after_result():
             if not immediate and journal.data.get('phase')=='ready_wait':
-                journal.transition('booking_engine')
+                journal.transition('booking_engine',defer=True)
                 journal.data['release_reference_epoch']=gate_observation.get('fired_epoch')
                 journal.data['release_perf_ns']=gate_observation.get('fired_perf_ns')
             if not journal.data.get('submission_observed'):
                 journal.data['submission_observed']=True
-                journal.event('submission_observed')
+                journal.event('submission_observed',defer=True)
         c.after_booking_result=after_result
         result=run(plan,c,prepared=prepared,before_first_submit=gate,context=context)
         state=result['state']
-        journal.finish(state,client=c,result=result)
+        try: journal.finish(state,client=c,result=result)
+        except (OSError,SafeError):
+            c.telemetry_incomplete=True;result['telemetry_incomplete']=True
+            print('任务摘要保存失败；已持久化的预约结果不变，请通过最小记录及小程序核对。')
         print('本轮结果：',state,'；本轮新增成功：',journal.data.get('success_count',0),'；历史计入：',journal.data.get('credited_count',0))
         if state in ('unknown','blocked'):
             print('【停止新增提交】请到小程序核对订单，不自动重试。')

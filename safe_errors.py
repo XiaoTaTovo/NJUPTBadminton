@@ -1,6 +1,7 @@
 """Structured local failures. Arbitrary exception messages are never telemetry."""
 import math
 MESSAGES = {
+ 'RECOVERY_RECORD_INVALID':'最小预约记录缺失、损坏或不一致；请人工核对订单，禁止重跑。',
  'BOUNDARY_RETRY_EXPIRED':'开放边界重试已超时，未发送请求。',
  'SAFE_STOP':'安全检查未通过，任务停止。',
  'CLOCK_COMMAND_TIMEOUT':'校时命令超时。',

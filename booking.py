@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from api import ROOT, SafeError, now_cn, CN
 from preferences import tier, rank, court_number
+from durable_attempts import AttemptStore, recover
+from notifications import Notifications
 
 
 def slot_key(s):
@@ -131,9 +133,23 @@ def existing_keys(private):
     cutoffs=json.loads(acknowledgement.read_text(encoding='utf-8')) if acknowledgement.exists() else {}
     def retained(slot, submitted_at):
         return float(submitted_at or 0)>float(cutoffs.get(slot_key(slot), -1))
+    evidence=recover(private)
+    for a in evidence.values():
+        if a['state'] in ('unknown','submitting'):
+            raise SafeError('历史请求未确认或账户受限；须先人工核对，禁止自动重跑。')
+        if a['state']=='success' and retained(a['slot'],a['submitted_at']):
+            keys.add(slot_key(a['slot']))
     for path in private.glob('run-*.json'):
-        run=json.loads(path.read_text(encoding='utf-8'))
+        try: run=json.loads(path.read_text(encoding='utf-8'))
+        except (OSError,ValueError):
+            if any(a['run_id']==path.stem[4:] for a in evidence.values()):
+                continue  # v4 evidence survives a torn non-critical report.
+            raise SafeError('历史报告损坏且没有可恢复的最小记录；请人工核对。') from None
         for a in run.get('attempts',[]):
+            if run.get('log_version',0)>=4:
+                if a.get('attempt_id') not in evidence:
+                    raise SafeError(code='RECOVERY_RECORD_INVALID')
+                continue
             if a['state'] in ('unknown','submitting'):
                 raise SafeError('历史预约结果未知，须先人工核对订单；禁止重新提交。')
             if a['state']=='success' and retained(a['slot'], a.get('submitted_at')):
@@ -162,10 +178,15 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
         held_prior={k for k in prior if k.split('|',1)[0]>=now_cn().date().isoformat()}
         creditable=set(prior)
         plan_id=str(uuid.uuid4())
-        record={'run_id':plan_id,'log_version':3,'created_at':now_cn().isoformat(),'plan':plan,
+        record={'run_id':plan_id,'log_version':4,'created_at':now_cn().isoformat(),'plan':plan,
                 'attempts':[],'observations':[],'state':'running','context':context or {},'credited_slots':[],
                 'recovery_reads':0,'local_prior_reserved':len(held_prior),'account_evidence':'local_only_manual_account_check_required'}
         path=private/('run-'+plan_id+'.json');atomic(path,record)
+        store=AttemptStore(private,plan_id,(context or {}).get('task_id'))
+        notification=Notifications(notify)
+        cached_sends={}
+        defer_requests=callable(getattr(type(client),'flush_telemetry',None))
+        if defer_requests: client.defer_telemetry=True
         completed={};attempted=set(prior);counts={};exhausted=set()
         deadline=time.monotonic()+max_seconds;pending_gate=before_first_submit
         gate_released_at=None;boundary_used=False;retry_pending=None;post_turn=0
@@ -189,7 +210,15 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                 g,sl=credit;creditable.discard(slot_key(sl))
                 completed[g['id']]=completed.get(g['id'],0)+1;record['credited_slots'].append(dict(sl))
             scheduler.rebuild(found)
-            atomic(path,record)
+            cached_sends.clear()
+            if callable(getattr(type(client),'prepare_submit',None)):
+                for g in plan['targets']:
+                    for sl in found:
+                        if (sl['date']==g['date'] and sl['start']==g['start'] and sl['end']==g['end']
+                                and sl['name'] in name_order[g['id']] and sl['available']
+                                and slot_key(sl) not in attempted):
+                            cached_sends[slot_key(sl)]=client.prepare_submit(sl)
+            if not record['attempts']: atomic(path,record)
         def refresh():
             nonlocal found,refresh_due
             if record['recovery_reads']>=1 or initial_reads+record['recovery_reads']>=max_reads:return False
@@ -208,6 +237,7 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                 record['first_selection_source']='initial_query'
             else:record['first_selection_source']='prefetched_today'
             observe()
+            if callable(getattr(type(client),'warmup_local',None)): client.warmup_local()
             while time.monotonic()<deadline:
                 if getattr(client,'telemetry_incomplete',False) is True:
                     record.update(state='blocked',exit_reason='telemetry_failure_before_next_send');break
@@ -219,6 +249,7 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                     record.update(state='blocked',exit_reason='local_reservation_cap');break
                 first_round_done=all(counts.get(g['id'],0)>0 or completed.get(g['id'],0)>=g['quantity'] or g['id'] in exhausted for g in plan['targets'])
                 if refresh_due and first_round_done:refresh()
+                selection_started=time.perf_counter_ns()
                 selected=None;is_retry=False;retry_deadline=None
                 if retry_pending:
                     g,sl,eligible_turn,retry_deadline=retry_pending
@@ -242,7 +273,8 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                 # Static request construction / identity parsing takes place BEFORE the release gate.
                 primer=getattr(type(client),'prepare_submit',None)
                 prepare_ns=time.perf_counter_ns()
-                send=client.prepare_submit(slot) if callable(primer) else lambda:client.submit(slot)
+                send=cached_sends.get(slot_key(slot))
+                if send is None: send=client.prepare_submit(slot) if callable(primer) else lambda:client.submit(slot)
                 prepared_local_ms=(time.perf_counter_ns()-prepare_ns)/1e6
                 if hasattr(client,'last_request'):client.submit_not_after=retry_deadline if is_retry else None
                 index=name_order[group['id']][slot['name']]
@@ -251,8 +283,16 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                    'state':'submitting','submitted_at':time.time(),'candidate_index':index,'candidate_tier':tier(slot['name']),
                    'is_focus_target':is_focus,'is_boundary_retry':is_retry,'candidate_ready_mono_ns':candidate_ns,'local_prepare_ms':prepared_local_ms}
                 record['attempts'].append(a)
-                persist_started=time.perf_counter_ns();atomic(path,record)
-                a['intent_persist_ms']=(time.perf_counter_ns()-persist_started)/1e6
+                a['candidate_selection_ms']=(candidate_ns-selection_started)/1e6
+                if len(record['attempts'])>1:
+                    previous=record['attempts'][-2]
+                    end=previous.get('classification_completed_mono_ns')
+                    if end is not None: a['previous_classification_to_candidate_ms']=(candidate_ns-end)/1e6
+                try: a['intent_io']=store.persist(a,len(record['attempts']))
+                except OSError:
+                    record.update(state='stopped',exit_reason='intent_persistence_failed')
+                    raise SafeError(code='LOG_WRITE_FAILED') from None
+                a['intent_persist_ms']=a['intent_io']['total_ms']
                 a['intent_persisted_mono_ns']=time.perf_counter_ns()
                 counts[group['id']]=counts.get(group['id'],0)+1;attempted.add(slot_key(slot))
                 timing_count=len(getattr(client,'timings',[]))
@@ -261,7 +301,9 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                     try:record['schedule']=pending_gate()
                     except BaseException as exc:
                         record.update(state='not_submitted',gate_error_type=type(exc).__name__)
-                        a.update(state='not_submitted',reason='interrupted_before_send');atomic(path,record);raise
+                        a.update(state='not_submitted',reason='interrupted_before_send')
+                        a['result_io']=store.persist(a,len(record['attempts']),result=True)
+                        raise
                     pending_gate=None
                     gate_released_at=time.monotonic();deadline=gate_released_at+max_seconds
                     client.release_perf_ns=record['schedule'].get('fired_perf_ns',time.perf_counter_ns())
@@ -276,19 +318,30 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                 events=getattr(client,'timings',[])
                 if len(events)>timing_count and events[-1].get('endpoint')=='booking':a['request_timing']=dict(events[-1])
                 a['submitted_at']=a.get('request_timing',{}).get('local_send',a['submitted_at'])
+                if a['state']=='rejected' and a.get('definitive_rejection') is not True:
+                    a.update(state='unknown',reason='unverified_rejection')
+                if a['state'] not in ('success','sold_out','rejected','unknown','blocked','not_submitted'):
+                    a.update(state='unknown',reason='unrecognized_submission_result')
+                # Minimal result is the restart authority; no full snapshot on this path.
+                try: a['result_io']=store.persist(a,len(record['attempts']),result=True)
+                except (OSError,SafeError):
+                    a['response_state']=a['state'];a['state']='unknown'
+                    record.update(state='unknown',exit_reason='result_persistence_failed')
+                    raise SafeError(code='LOG_WRITE_FAILED') from None
+                a['result_durable_mono_ns']=time.perf_counter_ns()
                 if a['state']=='success':
                     a['estimated_payment_deadline']=a['submitted_at']+300
                     completed[group['id']]=completed.get(group['id'],0)+1;new_successes+=1
-                # Response classification finishes BEFORE durable result IO.
-                atomic(path,record)
+                callback_start=time.perf_counter_ns()
                 if getattr(client,'after_booking_result',None):client.after_booking_result()
+                a['task_update_ms']=(time.perf_counter_ns()-callback_start)/1e6
                 if getattr(client,'telemetry_incomplete',False) is True:
                     record.update(state='unknown',telemetry_incomplete=True,exit_reason='telemetry_failure');break
                 if a['state']=='success':
-                    notify('\a预约成功：'+slot['name']+' '+slot['start']+'–'+slot['end']+'；请到小程序核对并手动支付。')
+                    notification.send('\a预约成功：'+slot['name']+' '+slot['start']+'–'+slot['end']+'；请到小程序核对并手动支付。')
                 elif a['state'] in ('unknown','blocked'):
                     record.update(state=a['state'],exit_reason=a.get('reason','unknown'))
-                    notify('停止新增提交：结果未知或账户限制；请人工核对。');break
+                    notification.send('停止新增提交：结果未知或账户限制；请人工核对。');break
                 elif a['state']=='not_submitted':
                     a['action']='boundary_retry_expired_without_send'
                 elif a['state'] in ('sold_out','rejected'):
@@ -307,12 +360,22 @@ def run(plan, client, private=None, notify=print, max_reads=60, max_seconds=60, 
                         if sold_streak[group['id']]>=3 and record['recovery_reads']==0:
                             refresh_due=True;refresh_date=group['date'];a['action']='refresh_once_after_inventory_rejections'
                         else:a['action']='next_candidate'
-                    notify('本候选明确失败：'+str(category or a.get('reason','未知'))+'；继续串行候选。')
+                    notification.send('本候选明确失败：'+str(category or a.get('reason','未知'))+'；继续串行候选。')
                 else:record.update(state='unknown',exit_reason='unrecognized_submission_result');break
                 if counts[group['id']]>=plan.get('max_attempts_per_target',max(3,group['quantity'])):exhausted.add(group['id'])
         finally:
             if record['state']=='running':record['state']='partial_or_exhausted'
             record.setdefault('exit_reason','time_budget_exhausted')
             record['completed']=completed;record['initial_reads']=initial_reads
-            record['timings']=list(getattr(client,'timings',[]));atomic(path,record)
+            record['notifications']=notification.close()
+            if defer_requests:
+                client.defer_telemetry=False
+                client.flush_telemetry()
+            record['timings']=list(getattr(client,'timings',[]))
+            if getattr(client,'telemetry_incomplete',False) is True: record['telemetry_incomplete']=True
+            try: atomic(path,record)
+            except OSError:
+                # Minimal intent/results remain authoritative. Do not turn success into failure.
+                record['telemetry_incomplete']=True
+                client.telemetry_incomplete=True
         return record

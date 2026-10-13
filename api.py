@@ -124,25 +124,35 @@ class Client:
         delay=earliest-time.monotonic()
         if delay>0: time.sleep(delay)
         limiter_done=time.perf_counter_ns()
+        prepare_cpu_start=time.thread_time_ns()
         if getattr(self,'submission_guard',None):
             guard=self.submission_guard;self.submission_guard=None;guard()
+        guard_done=time.perf_counter_ns()
         if not_after is not None and time.monotonic()>not_after:
             self.submit_not_after=None
             raise SafeError(code='BOUNDARY_RETRY_EXPIRED')
         self.submit_not_after=None
         factory=kwargs.pop('data_factory',None)
         prepared=kwargs.pop('_prepared_request',None)
+        self._payload_timing={'timestamp_ms':0.,'signature_ms':0.}
+        body_start=body_done=update_done=time.perf_counter_ns()
         if factory is not None:
             data=factory()
+            body_start=time.perf_counter_ns()
             if prepared is not None:
                 body=urlencode(data)
+                body_done=time.perf_counter_ns()
                 prepared.body=body
                 prepared.headers['Content-Length']=str(len(body.encode('ascii')))
-            else: kwargs['data']=data
+            else:
+                kwargs['data']=data
+                body_done=time.perf_counter_ns()
+            update_done=time.perf_counter_ns()
         signature_done=time.perf_counter_ns()
+        prepare_cpu_done=time.thread_time_ns()
         event={'method':method,'endpoint':'booking' if '/booking/' in path else 'slots' if '/time/display/' in path else 'types',
                'request_enter_ns':enter,'limiter_finished_ns':limiter_done,'signature_ready_ns':signature_done,
-               'http_status':None,'http_date':None,'timing_version':2}
+               'http_status':None,'http_date':None,'timing_version':3}
         if getattr(self,'task_id',None):event['task_id']=self.task_id
         release=getattr(self,'release_perf_ns',None);self.release_perf_ns=None
         def header_hook(response,*args,**kw):
@@ -153,6 +163,8 @@ class Client:
             return response
         if prepared is not None:prepared._booking_trace=event
         else: kwargs['hooks']={'response':header_hook}
+        if not_after is not None and time.monotonic()>not_after:
+            raise SafeError(code='BOUNDARY_RETRY_EXPIRED')
         event['local_send']=time.time()
         event['corrected_send']=getattr(self,'clock_time',time.time)()
         self.last_request=time.monotonic()
@@ -191,12 +203,46 @@ class Client:
                          rtt_ms=round((end-start)/1e6,4),http_total_ms=round((end-start)/1e6,4),
                          gate_to_http_call_ms=round((start-release)/1e6,4) if release else None,
                          gate_to_transport_ms=round((event['transport_enter_ns']-release)/1e6,4) if release and 'transport_enter_ns' in event else None)
+            event.update(submission_guard_ms=(guard_done-limiter_done)/1e6,
+                         body_encode_ms=(body_done-body_start)/1e6,
+                         request_update_ms=(update_done-body_done)/1e6,
+                         prepare_thread_cpu_ms=(prepare_cpu_done-prepare_cpu_start)/1e6,
+                         **self._payload_timing)
             self.timings.append(event)
-            try:
-                with (ROOT/'private/request-events.jsonl').open('a',encoding='utf-8') as f:f.write(json.dumps(event,ensure_ascii=False)+'\n')
-            except OSError:
-                self.telemetry_incomplete=True
-                print('请求日志写入失败；保留当前响应，停止后续新增提交。')
+            if not hasattr(self,'_pending_telemetry'): self._pending_telemetry=[]
+            self._pending_telemetry.append(event)
+            if not getattr(self,'defer_telemetry',False): self.flush_telemetry()
+
+    def flush_telemetry(self):
+        pending=getattr(self,'_pending_telemetry',[])
+        if not pending: return
+        try:
+            with (ROOT/'private/request-events.jsonl').open('a',encoding='utf-8') as f:
+                for event in pending: f.write(json.dumps(event,ensure_ascii=False)+'\n')
+            pending.clear()
+        except OSError:
+            self.telemetry_incomplete=True
+
+    @staticmethod
+    def _make_payload(prefix, date, clock):
+        start=time.perf_counter_ns()
+        ts=str(int(clock()*1000))
+        timestamp_done=time.perf_counter_ns()
+        h=prefix.copy();h.update((ts+'|4pGmY6s9zX').encode())
+        fingerprint=h.hexdigest()
+        signature_done=time.perf_counter_ns()
+        return ({'timestamp':ts,'fingerprint':fingerprint,'date':date},
+                {'timestamp_ms':(timestamp_done-start)/1e6,
+                 'signature_ms':(signature_done-timestamp_done)/1e6})
+
+    def warmup_local(self):
+        # Synthetic identity only; no future timestamp, network or limiter mutation.
+        prefix=hashlib.sha256(b'synthetic-slot|synthetic-user|2099-01-01|')
+        data,_=self._make_payload(prefix,'2099-01-01',time.time)
+        body=urlencode(data)
+        request=requests.Request('POST','https://example.invalid/',data=body).prepare()
+        request.headers['Content-Length']=str(len(body.encode('ascii')))
+        time.thread_time_ns()
 
     def get_list(self, path, **kwargs):
         try:
@@ -263,9 +309,8 @@ class Client:
         path='/venue/user/booking/pomelo/v2/'+frozen['id']
         prefix=hashlib.sha256(f"{frozen['id']}|{sid}|{frozen['date']}|".encode())
         def payload():
-            ts=str(int(getattr(self,'clock_time',time.time)()*1000))
-            h=prefix.copy();h.update((ts+'|4pGmY6s9zX').encode())
-            return {'timestamp':ts,'fingerprint':h.hexdigest(),'date':frozen['date']}
+            data,self._payload_timing=self._make_payload(prefix,frozen['date'],getattr(self,'clock_time',time.time))
+            return data
         prepared=None
         if isinstance(getattr(self,'http',None),requests.Session):
             prepared=self.http.prepare_request(requests.Request('POST',BASE+path,

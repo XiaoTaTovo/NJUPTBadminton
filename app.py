@@ -167,15 +167,30 @@ def observe():
         c.close()
 
 def results():
+    from durable_attempts import recover
+    evidence=recover(PRIVATE)
     paths=sorted(PRIVATE.glob('run-*.json'),key=lambda p:p.stat().st_mtime,reverse=True)
+    displayed=set()
     for p in paths[:5]:
-        r=json.loads(p.read_text(encoding='utf-8'))
+        try: r=json.loads(p.read_text(encoding='utf-8'))
+        except (OSError,ValueError):
+            print('完整报告不可读，请看最小持久化记录或菜单11诊断。');continue
         print(r['created_at'],r['state'])
-        for a in r['attempts']:
+        if r.get('log_version',0)>=4:
+            attempts=[a for a in evidence.values() if a['run_id']==r['run_id']]
+        else: attempts=r['attempts']
+        for a in attempts:
+            if a.get('attempt_id'): displayed.add(a['attempt_id'])
             s=a['slot']; print(' ',s['name'],s['date'],s['start'],s['end'],a['state'],a.get('reason',''))
             if a['state']=='success':
-                left=max(0,int(a['estimated_payment_deadline']-time.time()))
+                deadline=a.get('estimated_payment_deadline',a.get('submitted_at',0)+300)
+                left=max(0,int(deadline-time.time()))
                 print('  估算支付剩余秒数：',left,'；以小程序实际状态为准。')
+    remaining=[a for key,a in evidence.items() if key not in displayed]
+    if remaining:
+        print('其他最小持久化记录（完整报告可能缺失；不是实时支付状态）：')
+        for a in sorted(remaining,key=lambda a:a['submitted_at'],reverse=True)[:10]:
+            s=a['slot'];print(' ',s['date'],s['start'],s['end'],s['name'],a['state'])
 
 def advanced_main():
     import local_session
